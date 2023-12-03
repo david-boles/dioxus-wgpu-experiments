@@ -62,8 +62,16 @@ const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Point(f32, f32);
 
-// const POINTS: &[Point] = &[Point(-0.7, -0.7), Point(0.0, 0.7), Point(0.7, -0.7)];
-const NUM_POINTS: usize = 20;
+// Degenerate - reverse
+// const POINTS: &[Point] = &[
+//     Point(0.49999999999999, -0.7),
+//     Point(0.4, 0.7),
+//     Point(0.5, -0.7),
+// ];
+// Degenerate - continue
+// const POINTS: &[Point] = &[Point(0.0, -0.5), Point(0.0, 0.0), Point(0.0, 0.5)];
+// const NUM_POINTS: usize = 134217728 / (8);
+const NUM_POINTS: usize = 10;
 
 lazy_static! {
     static ref POINTS: Vec<Point> = {
@@ -218,7 +226,7 @@ fn App(cx: Scope) -> Element {
                     push_constant_ranges: &[],
                 });
 
-            let segment_bind_group_layout =
+            let points_bind_group_layout =
                 device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("segment bind group layout"),
                     entries: &[BindGroupLayoutEntry {
@@ -236,7 +244,7 @@ fn App(cx: Scope) -> Element {
             let segment_render_pipeline_layout =
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Segment Render Pipeline Layout"),
-                    bind_group_layouts: &[&segment_bind_group_layout],
+                    bind_group_layouts: &[&points_bind_group_layout],
                     push_constant_ranges: &[],
                 });
 
@@ -253,10 +261,7 @@ fn App(cx: Scope) -> Element {
                     entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent::REPLACE,
-                            alpha: wgpu::BlendComponent::REPLACE,
-                        }),
+                        blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -290,23 +295,62 @@ fn App(cx: Scope) -> Element {
                     layout: Some(&segment_render_pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &segment_shader,
-                        entry_point: "vs_main",
+                        entry_point: "vs_line",
                         buffers: &[],
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &segment_shader,
-                        entry_point: "fs_main",
+                        entry_point: "fs_line",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
-                            blend: Some(wgpu::BlendState {
-                                color: wgpu::BlendComponent::REPLACE,
-                                alpha: wgpu::BlendComponent::REPLACE,
-                            }),
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
+                        // or Features::POLYGON_MODE_POINT
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        // Requires Features::DEPTH_CLIP_CONTROL
+                        unclipped_depth: false,
+                        // Requires Features::CONSERVATIVE_RASTERIZATION
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState {
+                        count: 1,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    // If the pipeline will be used with a multiview render pass, this
+                    // indicates how many array layers the attachments will have.
+                    multiview: None,
+                });
+
+            let dot_render_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Dot Render Pipeline"),
+                    layout: Some(&segment_render_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &segment_shader,
+                        entry_point: "vs_dot",
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &segment_shader,
+                        entry_point: "fs_dot",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
                         strip_index_format: None,
                         front_face: wgpu::FrontFace::Ccw,
                         cull_mode: None,
@@ -347,7 +391,7 @@ fn App(cx: Scope) -> Element {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             });
 
-            let segment_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            let points_bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("segment bind group"),
                 entries: &[BindGroupEntry {
                     binding: 0,
@@ -357,7 +401,7 @@ fn App(cx: Scope) -> Element {
                         size: None,
                     }),
                 }],
-                layout: &segment_bind_group_layout,
+                layout: &points_bind_group_layout,
             });
 
             let render = || -> Result<(), wgpu::SurfaceError> {
@@ -397,8 +441,12 @@ fn App(cx: Scope) -> Element {
                     render_pass.draw_indexed(0..num_indices, 0, 0..1);
 
                     render_pass.set_pipeline(&segment_render_pipeline);
-                    render_pass.set_bind_group(0, &segment_bind_group, &[]);
+                    render_pass.set_bind_group(0, &points_bind_group, &[]);
                     render_pass.draw(0..u32::try_from(2 * POINTS.len()).unwrap(), 0..1);
+
+                    render_pass.set_pipeline(&dot_render_pipeline);
+                    render_pass.set_bind_group(0, &points_bind_group, &[]); // TODO
+                    render_pass.draw(0..u32::try_from(6 * POINTS.len()).unwrap(), 0..1);
                 }
 
                 queue.submit(iter::once(encoder.finish()));
@@ -420,6 +468,7 @@ fn App(cx: Scope) -> Element {
                             let ratio = web_sys::window().unwrap().device_pixel_ratio();
                             // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
                             // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
+                            // let ratio = 0.1;
                             config.width = ((width as f64) * ratio) as u32;
                             config.height = ((height as f64) * ratio) as u32;
 
@@ -470,6 +519,7 @@ fn App(cx: Scope) -> Element {
                 canvas {
                     id: "my-canvas",
                     style: "width: 100%; height: 100%;",
+                    image_rendering: "pixelated",
                     onmounted: |event| {
                         on_resize.mount(event);
                     }
