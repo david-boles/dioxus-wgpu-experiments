@@ -1,18 +1,28 @@
 #![allow(non_snake_case)]
+use console_log::log;
 // import the prelude to get access to the `rsx!` macro and the `Scope` and `Element` types
 use dioxus::prelude::*;
 // use dioxus_helmet::Helmet;
 use futures_util::stream::StreamExt;
+use js_sys::is_finite;
 use js_sys::Math::random;
 use lazy_static::lazy_static;
+use log::info;
 use rand::{distributions::Uniform, Rng};
-use std::{iter, sync::mpsc::TryRecvError};
+use std::cmp::{max, min};
+use std::num::NonZeroU64;
+use std::{
+    iter,
+    ops::{RangeInclusive, RangeToInclusive},
+    sync::mpsc::TryRecvError,
+};
 use web_sys::HtmlCanvasElement;
 use wgpu::{
     util::{DeviceExt, RenderEncoder},
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
+use wgpu::{BufferDescriptor, BufferUsages};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -25,6 +35,36 @@ use wasm_bindgen::prelude::*;
 use resize::*;
 
 mod resize;
+
+fn f32_min(a: f32, b: f32) -> f32 {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => {
+            if a.lt(&b) {
+                a
+            } else {
+                b
+            }
+        }
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => f32::MAX,
+    }
+}
+
+fn f32_max(a: f32, b: f32) -> f32 {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => {
+            if a.gt(&b) {
+                a
+            } else {
+                b
+            }
+        }
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => f32::MAX,
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -70,6 +110,8 @@ struct Point(f32, f32);
 // ];
 // Degenerate - continue
 // const POINTS: &[Point] = &[Point(0.0, -0.5), Point(0.0, 0.0), Point(0.0, 0.5)];
+
+// const POINTS: &[Point] = &[Point(-1.0, -1.0), Point(1.0, 1.0)];
 // const NUM_POINTS: usize = 134217728 / (8);
 const NUM_POINTS: usize = 10;
 
@@ -226,25 +268,37 @@ fn App(cx: Scope) -> Element {
                     push_constant_ranges: &[],
                 });
 
-            let points_bind_group_layout =
+            let line_bind_group_layout =
                 device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("segment bind group layout"),
-                    entries: &[BindGroupLayoutEntry {
-                        binding: 0, // TODO 0
-                        visibility: ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0, // TODO 0
+                            visibility: ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(NonZeroU64::new(12 * 4).unwrap()),
+                            },
+                            count: None,
                         },
-                        count: None,
-                    }],
+                        BindGroupLayoutEntry {
+                            binding: 1, // TODO 0
+                            visibility: ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
                 });
 
             let segment_render_pipeline_layout =
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Segment Render Pipeline Layout"),
-                    bind_group_layouts: &[&points_bind_group_layout],
+                    bind_group_layouts: &[&line_bind_group_layout],
                     push_constant_ranges: &[],
                 });
 
@@ -391,21 +445,225 @@ fn App(cx: Scope) -> Element {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             });
 
-            let points_bind_group = device.create_bind_group(&BindGroupDescriptor {
-                label: Some("segment bind group"),
-                entries: &[BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(BufferBinding {
-                        buffer: &point_buffer,
-                        offset: 0,
-                        size: None,
-                    }),
-                }],
-                layout: &points_bind_group_layout,
+            let uniform_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("uniforms"),
+                size: 12 * 4,
+                usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                mapped_at_creation: false,
             });
+
+            let line_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("segment bind group"),
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(BufferBinding {
+                            buffer: &uniform_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(BufferBinding {
+                            buffer: &point_buffer,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                ],
+                layout: &line_bind_group_layout,
+            });
+
+            #[derive(Clone, Copy, Debug)]
+            struct AxisScale {
+                /// First point's position in some axis in some space
+                start: f32,
+                /// Last point's position in some axis in some space
+                end: f32,
+            }
+
+            impl AxisScale {
+                const NAN: Self = Self {
+                    start: f32::NAN,
+                    end: f32::NAN,
+                };
+            }
+
+            /// The scale of a set of points in some space
+            #[derive(Clone, Copy, Debug)]
+            struct Scale {
+                horizontal: AxisScale,
+                vertical: AxisScale,
+            }
+
+            impl Scale {
+                const NAN: Self = Self {
+                    horizontal: AxisScale::NAN,
+                    vertical: AxisScale::NAN,
+                };
+
+                const RASTER: Self = Self {
+                    horizontal: AxisScale {
+                        start: -1.0,
+                        end: 1.0,
+                    },
+                    vertical: AxisScale {
+                        start: -1.0,
+                        end: 1.0,
+                    },
+                };
+
+                /// WGSL mat3x2f (2x3) to convert from a scale in one space to a scale in another space.
+                pub fn transform_matrix(from: Scale, to: Scale) -> [f32; 6] {
+                    info!("transform");
+                    info!("{from:?}");
+                    info!("{to:?}");
+                    let h_scale = (to.horizontal.end - to.horizontal.start)
+                        / (from.horizontal.end - from.horizontal.start);
+                    let v_scale = (to.vertical.end - to.vertical.start)
+                        / (from.vertical.end - from.vertical.start);
+                    info!("{h_scale}");
+                    info!("{v_scale}");
+                    [
+                        h_scale,
+                        0.0,
+                        0.0,
+                        v_scale,
+                        to.horizontal.start - (from.horizontal.start * h_scale),
+                        to.vertical.start - (from.vertical.start * v_scale),
+                    ]
+                }
+
+                pub fn transform_matrix_to(&self, to: Scale) -> [f32; 6] {
+                    Self::transform_matrix(*self, to)
+                }
+
+                pub fn point_scale_to_uniform(
+                    &self,
+                    px_width: u32,
+                    px_height: u32,
+                    px_margin: u32,
+                ) -> [[f32; 6]; 2] {
+                    let px_width = px_width as f32;
+                    let px_height = px_height as f32;
+                    let px_margin = px_margin as f32;
+                    let px_scale = Scale {
+                        horizontal: AxisScale {
+                            start: 0.0,
+                            end: (px_width - 1.0),
+                        },
+                        vertical: AxisScale {
+                            start: (px_height - 1.0),
+                            end: 0.0,
+                        },
+                    };
+                    let px_scale_with_margin = Scale {
+                        horizontal: AxisScale {
+                            start: px_scale.horizontal.start + px_margin,
+                            end: px_scale.horizontal.end - px_margin,
+                        },
+                        vertical: AxisScale {
+                            start: px_scale.vertical.start - px_margin,
+                            end: px_scale.vertical.end + px_margin,
+                        },
+                    };
+
+                    // {{605.5, 0, 605.5},{0, -445.5, 445.5}}
+                    // {{0.0016515277, 0, -1},{0, -0.002244669, 1}}
+
+                    // Matrix computed for -1,-1 to 1, 1
+                    // return [
+                    //     [605.5, 0.0, 0.0, -445.5, 605.5, 445.5],
+                    //     [0.0016515277, 0.0, 0.0, -0.002244669, -1.0, 1.0],
+                    // ];
+
+                    // Random matrix and inverse
+                    // let det = 915.0;
+                    // return [
+                    //     [24.0, 51.0, -17.0, 2.0, -6.0, 12.0],
+                    //     [
+                    //         2.0 / det,
+                    //         -51.0 / det,
+                    //         17.0 / det,
+                    //         24.0 / det,
+                    //         -192.0 / det,
+                    //         -594.0 / det,
+                    //     ],
+                    // ];
+
+                    // return [
+                    //     [1.0, 0.0, 0.0, 1.0, -1.0, 0.0],
+                    //     [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+                    // ];
+
+                    return [
+                        self.transform_matrix_to(px_scale_with_margin),
+                        px_scale.transform_matrix_to(Scale::RASTER),
+                    ];
+                }
+            }
+
+            let mut current_scale = {
+                let mut initial_scale = POINTS.iter().fold(Scale::NAN, |scale, point| Scale {
+                    horizontal: AxisScale {
+                        start: f32_min(scale.horizontal.start, point.0),
+                        end: f32_max(scale.horizontal.end, point.0),
+                    },
+                    vertical: AxisScale {
+                        start: f32_min(scale.vertical.start, point.1),
+                        end: f32_max(scale.vertical.end, point.1),
+                    },
+                });
+
+                for axis in [&mut initial_scale.horizontal, &mut initial_scale.vertical] {
+                    if axis.start.is_finite() {
+                        if axis.start == axis.end {
+                            *axis = AxisScale {
+                                start: axis.start - 1.0,
+                                end: axis.start + 1.0,
+                            }
+                        }
+                    } else {
+                        *axis = AxisScale {
+                            start: -1.0,
+                            end: 1.0,
+                        }
+                    }
+                }
+
+                initial_scale
+            };
+
+            let mut canvas_outer_size = ComponentSize::default();
 
             let render = || -> Result<(), wgpu::SurfaceError> {
                 let output = surface.get_current_texture()?;
+
+                queue.write_buffer(
+                    &uniform_buffer,
+                    0,
+                    bytemuck::cast_slice(&current_scale.point_scale_to_uniform(
+                        output.texture.width(),
+                        output.texture.height(),
+                        50,
+                    )),
+                );
+
+                // info!("{:?}", POINTS.as_ref());
+                info!("Matrices");
+                info!("{current_scale:?}");
+                for mat in current_scale.point_scale_to_uniform(
+                    canvas_outer_size.width as u32,
+                    canvas_outer_size.height as u32,
+                    0,
+                ) {
+                    info!(
+                        "{{{{{}, {}, {}}},{{{}, {}, {}}}}}",
+                        mat[0], mat[2], mat[4], mat[1], mat[3], mat[5]
+                    );
+                }
+
                 let view = output
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
@@ -440,12 +698,10 @@ fn App(cx: Scope) -> Element {
                     render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..num_indices, 0, 0..1);
 
+                    render_pass.set_bind_group(0, &line_bind_group, &[]);
                     render_pass.set_pipeline(&segment_render_pipeline);
-                    render_pass.set_bind_group(0, &points_bind_group, &[]);
                     render_pass.draw(0..u32::try_from(2 * POINTS.len()).unwrap(), 0..1);
-
                     render_pass.set_pipeline(&dot_render_pipeline);
-                    render_pass.set_bind_group(0, &points_bind_group, &[]); // TODO
                     render_pass.draw(0..u32::try_from(6 * POINTS.len()).unwrap(), 0..1);
                 }
 
