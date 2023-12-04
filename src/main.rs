@@ -9,6 +9,7 @@ use js_sys::Math::random;
 use lazy_static::lazy_static;
 use log::info;
 use rand::{distributions::Uniform, Rng};
+use std::cell::Cell;
 use std::cmp::{max, min};
 use std::num::NonZeroU64;
 use std::{
@@ -22,7 +23,7 @@ use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
-use wgpu::{BufferDescriptor, BufferUsages};
+use wgpu::{BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -102,31 +103,40 @@ const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Point(f32, f32);
 
-// Degenerate - reverse
 // const POINTS: &[Point] = &[
-//     Point(0.49999999999999, -0.7),
-//     Point(0.4, 0.7),
-//     Point(0.5, -0.7),
+//     Point(-0.5, -0.5),
+//     Point(0.5, 0.5),
+//     Point(0.5, -0.5),
+//     Point(-0.5, 0.5),
+//     Point(-0.5, -0.45),
 // ];
+
+// Degenerate - reverse
+const POINTS: &[Point] = &[
+    Point(0.3, -0.7),
+    Point(0.49, -0.7),
+    Point(0.5, 0.7),
+    Point(0.51, -0.7),
+];
 // Degenerate - continue
 // const POINTS: &[Point] = &[Point(0.0, -0.5), Point(0.0, 0.0), Point(0.0, 0.5)];
 
 // const POINTS: &[Point] = &[Point(-1.0, -1.0), Point(1.0, 1.0)];
 // const NUM_POINTS: usize = 134217728 / (8);
-const NUM_POINTS: usize = 10;
+// const NUM_POINTS: usize = 100;
 
-lazy_static! {
-    static ref POINTS: Vec<Point> = {
-        (0..NUM_POINTS)
-            .map(|i| {
-                Point(
-                    1.5 * (((i as f32) / (NUM_POINTS as f32)) - 0.5),
-                    rand::thread_rng().sample(Uniform::from(-0.75..0.75)),
-                )
-            })
-            .collect()
-    };
-}
+// lazy_static! {
+//     static ref POINTS: Vec<Point> = {
+//         (0..NUM_POINTS)
+//             .map(|i| {
+//                 Point(
+//                     1.5 * (((i as f32) / (NUM_POINTS as f32)) - 0.5),
+//                     rand::thread_rng().sample(Uniform::from(-0.75..0.75)),
+//                 )
+//             })
+//             .collect()
+//     };
+// }
 
 impl Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -358,6 +368,14 @@ fn App(cx: Scope) -> Element {
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
                             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            // blend: Some(wgpu::BlendState {
+                            //     color: BlendComponent {
+                            //         src_factor: BlendFactor::SrcAlpha,
+                            //         dst_factor: BlendFactor::DstAlpha,
+                            //         operation: BlendOperation::Add,
+                            //     },
+                            //     alpha: BlendComponent::REPLACE,
+                            // }),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -635,7 +653,7 @@ fn App(cx: Scope) -> Element {
                 initial_scale
             };
 
-            let mut canvas_outer_size = ComponentSize::default();
+            let mut canvas_outer_size = Cell::new(ComponentSize::default());
 
             let render = || -> Result<(), wgpu::SurfaceError> {
                 let output = surface.get_current_texture()?;
@@ -646,7 +664,7 @@ fn App(cx: Scope) -> Element {
                     bytemuck::cast_slice(&current_scale.point_scale_to_uniform(
                         output.texture.width(),
                         output.texture.height(),
-                        50,
+                        100,
                     )),
                 );
 
@@ -654,8 +672,8 @@ fn App(cx: Scope) -> Element {
                 info!("Matrices");
                 info!("{current_scale:?}");
                 for mat in current_scale.point_scale_to_uniform(
-                    canvas_outer_size.width as u32,
-                    canvas_outer_size.height as u32,
+                    canvas_outer_size.get().width as u32,
+                    canvas_outer_size.get().height as u32,
                     0,
                 ) {
                     info!(
@@ -720,13 +738,14 @@ fn App(cx: Scope) -> Element {
                 let mut count = 1;
                 'process_events: loop {
                     match event {
-                        CanvasEvent::Resize(ComponentSize { width, height }) => {
+                        CanvasEvent::Resize(size) => {
+                            canvas_outer_size.set(size);
                             let ratio = web_sys::window().unwrap().device_pixel_ratio();
                             // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
                             // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
                             // let ratio = 0.1;
-                            config.width = ((width as f64) * ratio) as u32;
-                            config.height = ((height as f64) * ratio) as u32;
+                            config.width = ((size.width as f64) * ratio) as u32;
+                            config.height = ((size.height as f64) * ratio) as u32;
 
                             surface.configure(&device, &config);
                         }
