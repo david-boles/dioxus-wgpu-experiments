@@ -1,12 +1,12 @@
 // Vertex shader
 
-const line_half_width: f32 = 40f;
+const line_half_width: f32 = 70f;
 const line_feathering: f32 = line_half_width * 0.5f;
 // const line_feathering: f32 = 0.025;
 
 // const dot_radius: f32 = 0.0125;
 
-const dot_radius: f32 = line_half_width * 0f;
+const dot_radius: f32 = line_half_width * 0.1f;
 const dot_feathering: f32 = dot_radius * 0.5f;
 // const dot_feathering: f32 = 0.00625;
 
@@ -50,6 +50,7 @@ struct VertexOutput {
     @location(4) @interpolate(flat) seg_len_px: f32,
     // Constant for the current segment, whether it's an odd segment (as opposed to even).
     @location(5) @interpolate(flat) is_odd: u32, // Bools can't be passed between vertex and fragment shaders
+    @location(6) @interpolate(flat) is_odd_vert: u32, // Bools can't be passed between vertex and fragment shaders
 };
 
 struct LineSegment {
@@ -136,6 +137,7 @@ fn vs_line(
     out.vertex_position = vec4f(uniforms.px_to_raster * vec3f(vertex_px, 1f), 0f, 1f);
     out.seg_len_px = seg1.length_px;
     out.is_odd = curr_point_ind & 1u;
+    out.is_odd_vert = vertex_index & 1u;
 
     var even_seg: LineSegment;
     var odd_seg: LineSegment;
@@ -226,19 +228,27 @@ fn fs_line(in: VertexOutput) -> @location(0) vec4<f32> {
         dist_to_line=length(vec2f(tan_to_end_px, seg_perpendicular_px));
     }
 
-    var alpha = 1.0;
-    if dist_to_line > (line_half_width - line_feathering) {
-        alpha = (line_half_width - dist_to_line) / line_feathering;
+    if in.is_odd == 1u {
+        discard;
     }
+    return vec4<f32>(f32(in.is_odd_vert), 0.0, 0.0, 1.0);
 
-    // if in.is_odd == 1u {
-        // return vec4<f32>(0.0, 0.0, 1.0, (0.25*alpha)+0.5);
-        return vec4<f32>(0.0, 0.0, 1.0, 0.5*alpha);
-    // }else {
-    //     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // if dist_to_line < (line_half_width - line_feathering) {
+    //     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    // } else if dist_to_line > line_half_width {
+    //     discard;
+    // } else {
+    //     let alpha = (line_half_width - dist_to_line) / line_feathering;
+    //     return vec4<f32>(0.0, 0.0, alpha, alpha);
     // }
+
     
-    // // return vec4<f32>(0.0, 0.0, alpha, 1.0);
+
+    // else {
+    // //     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // // }
+    
+    // // // return vec4<f32>(0.0, 0.0, alpha, 1.0);
 
 
     // return vec4<f32>((seg_perpendicular_px - 30f)/2f, 0.3*f32(in.is_odd), 0f, 0.5*alpha);

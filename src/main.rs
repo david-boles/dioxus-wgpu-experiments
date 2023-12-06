@@ -23,7 +23,9 @@ use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
-use wgpu::{BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages};
+use wgpu::{
+    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages, CompositeAlphaMode,
+};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -116,7 +118,7 @@ const POINTS: &[Point] = &[
     Point(0.3, -0.7),
     Point(0.49, -0.7),
     Point(0.5, 0.7),
-    Point(0.51, -0.7),
+    Point(0.51, -2.0),
 ];
 // Degenerate - continue
 // const POINTS: &[Point] = &[Point(0.0, -0.5), Point(0.0, 0.0), Point(0.0, 0.5)];
@@ -255,8 +257,8 @@ fn App(cx: Scope) -> Element {
                 format: surface_format,
                 width: canvas.width(),
                 height: canvas.height(),
-                present_mode: surface_caps.present_modes[0],
-                alpha_mode: surface_caps.alpha_modes[0],
+                present_mode: wgpu::PresentMode::AutoVsync,
+                alpha_mode: CompositeAlphaMode::PreMultiplied,
                 view_formats: vec![],
             };
             surface.configure(&device, &config);
@@ -417,7 +419,18 @@ fn App(cx: Scope) -> Element {
                         entry_point: "fs_dot",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            blend: Some(wgpu::BlendState {
+                                color: BlendComponent {
+                                    src_factor: BlendFactor::One,
+                                    dst_factor: BlendFactor::One,
+                                    operation: BlendOperation::Max,
+                                },
+                                alpha: BlendComponent {
+                                    src_factor: BlendFactor::One,
+                                    dst_factor: BlendFactor::One,
+                                    operation: BlendOperation::Max,
+                                },
+                            }),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -698,10 +711,10 @@ fn App(cx: Scope) -> Element {
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.1,
-                                    g: 0.2,
-                                    b: 0.3,
-                                    a: 1.0,
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
                                 }),
                                 store: wgpu::StoreOp::Store,
                             },
@@ -795,6 +808,7 @@ fn App(cx: Scope) -> Element {
                     id: "my-canvas",
                     style: "width: 100%; height: 100%;",
                     image_rendering: "pixelated",
+                    background: "#222",
                     onmounted: |event| {
                         on_resize.mount(event);
                     }
