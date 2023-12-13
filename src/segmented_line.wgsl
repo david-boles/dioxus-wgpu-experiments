@@ -1,13 +1,13 @@
 // Vertex shader
 
-const line_half_width: f32 = 70f;
-const line_feathering: f32 = line_half_width * 0.5f;
+const line_half_width: f32 = 10f;
+const line_feathering: f32 = 2f;
 // const line_feathering: f32 = 0.025;
 
 // const dot_radius: f32 = 0.0125;
 
-const dot_radius: f32 = line_half_width * 0.1f;
-const dot_feathering: f32 = dot_radius * 0.5f;
+const dot_radius: f32 = line_half_width * 2f;
+const dot_feathering: f32 = 2f;
 // const dot_feathering: f32 = 0.00625;
 
 
@@ -163,6 +163,8 @@ fn vs_line(
 
 struct DotOutput {
     @builtin(position) vertex_position: vec4<f32>,
+    @location(0) @interpolate(flat) ind: u32,
+    @location(1) @interpolate(linear, center) pos_px: vec2f,
 };
 
 // TODO naga/wgpu bug prevents this from being a const
@@ -180,12 +182,15 @@ var<private> dot_offset_lut: array<vec2f, 6> = array<vec2f, 6>(
 @vertex
 fn vs_dot(@builtin(vertex_index) vertex_index : u32) -> DotOutput {
     let lut_index: u32 = vertex_index % 6u;
-    let point = uniforms.point_to_px * vec3f(points[vertex_index / 6u], 1f);
+    let ind = vertex_index / 6u;
+    let point = uniforms.point_to_px * vec3f(points[ind], 1f);
 
     let vertex = point + (dot_offset_lut[lut_index] * vec2(dot_radius, dot_radius));
 
     var out: DotOutput;
     out.vertex_position = vec4(uniforms.px_to_raster * vec3f(vertex, 1f), 0f, 1f);
+    out.ind = ind;
+    out.pos_px = vertex - point;
     
     return out;
 }
@@ -228,34 +233,45 @@ fn fs_line(in: VertexOutput) -> @location(0) vec4<f32> {
         dist_to_line=length(vec2f(tan_to_end_px, seg_perpendicular_px));
     }
 
-    if in.is_odd == 1u {
-        discard;
-    }
-    return vec4<f32>(f32(in.is_odd_vert), 0.0, 0.0, 1.0);
-
-    // if dist_to_line < (line_half_width - line_feathering) {
-    //     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    // } else if dist_to_line > line_half_width {
+    // if in.is_odd == 1u {
     //     discard;
-    // } else {
-    //     let alpha = (line_half_width - dist_to_line) / line_feathering;
-    //     return vec4<f32>(0.0, 0.0, alpha, alpha);
     // }
 
+    let color = c3;
+
+    if dist_to_line < (line_half_width - line_feathering) {
+        return vec4<f32>(color, 1.0);
+    } else if dist_to_line > line_half_width {
+        discard;
+    }
+
+    let alpha = (line_half_width - dist_to_line) / line_feathering;
+    return vec4<f32>(alpha*color, alpha);
+
     
-
-    // else {
-    // //     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    // // }
-    
-    // // // return vec4<f32>(0.0, 0.0, alpha, 1.0);
-
-
-    // return vec4<f32>((seg_perpendicular_px - 30f)/2f, 0.3*f32(in.is_odd), 0f, 0.5*alpha);
-    // return vec4<f32>(alpha, 0.3*f32(in.is_odd), 0f, 0.5*alpha);
 }
+
+const c1: vec3f = vec3f(0.0, 0.4470, 0.7410);
+const c2: vec3f = vec3f(0.8500, 0.3250, 0.0980);
+const c3: vec3f = vec3f(0.9290, 0.6940, 0.1250);
+const c4: vec3f = vec3f(0.4940, 0.1840, 0.5560);
+const c5: vec3f = vec3f(0.4660, 0.6740, 0.1880);
+const c6: vec3f = vec3f(0.3010, 0.7450, 0.9330);
+const c7: vec3f = vec3f(0.6350, 0.0780, 0.1840);
 
 @fragment
 fn fs_dot(in: DotOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 1.0, 0.0, 0.5);
+
+    let color = c3;
+
+    let dist_to_point = length(in.pos_px);
+    if dist_to_point < (dot_radius - dot_feathering) {
+        return vec4<f32>(color, 1.0);
+    } else if dist_to_point > dot_radius {
+        discard;
+    }
+
+    let alpha = (dot_radius - dist_to_point) / dot_feathering;
+
+    return vec4<f32>(alpha * color, alpha);
 }

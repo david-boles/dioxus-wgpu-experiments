@@ -114,31 +114,31 @@ struct Point(f32, f32);
 // ];
 
 // Degenerate - reverse
-const POINTS: &[Point] = &[
-    Point(0.3, -0.7),
-    Point(0.49, -0.7),
-    Point(0.5, 0.7),
-    Point(0.51, -2.0),
-];
+// const POINTS: &[Point] = &[
+//     Point(0.3, -0.7),
+//     Point(0.49, -0.7),
+//     Point(0.5, 0.7),
+//     Point(0.51, -2.0),
+// ];
 // Degenerate - continue
 // const POINTS: &[Point] = &[Point(0.0, -0.5), Point(0.0, 0.0), Point(0.0, 0.5)];
 
 // const POINTS: &[Point] = &[Point(-1.0, -1.0), Point(1.0, 1.0)];
 // const NUM_POINTS: usize = 134217728 / (8);
-// const NUM_POINTS: usize = 100;
+const NUM_POINTS: usize = 100;
 
-// lazy_static! {
-//     static ref POINTS: Vec<Point> = {
-//         (0..NUM_POINTS)
-//             .map(|i| {
-//                 Point(
-//                     1.5 * (((i as f32) / (NUM_POINTS as f32)) - 0.5),
-//                     rand::thread_rng().sample(Uniform::from(-0.75..0.75)),
-//                 )
-//             })
-//             .collect()
-//     };
-// }
+lazy_static! {
+    static ref POINTS: Vec<Point> = {
+        (0..NUM_POINTS)
+            .map(|i| {
+                Point(
+                    1.5 * (((i as f32) / (NUM_POINTS as f32)) - 0.5),
+                    rand::thread_rng().sample(Uniform::from(-0.75..0.75)),
+                )
+            })
+            .collect()
+    };
+}
 
 impl Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -369,7 +369,18 @@ fn App(cx: Scope) -> Element {
                         entry_point: "fs_line",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            blend: Some(wgpu::BlendState {
+                                color: BlendComponent {
+                                    src_factor: BlendFactor::One,
+                                    dst_factor: BlendFactor::One,
+                                    operation: BlendOperation::Max,
+                                },
+                                alpha: BlendComponent {
+                                    src_factor: BlendFactor::One,
+                                    dst_factor: BlendFactor::One,
+                                    operation: BlendOperation::Max,
+                                },
+                            }),
                             // blend: Some(wgpu::BlendState {
                             //     color: BlendComponent {
                             //         src_factor: BlendFactor::SrcAlpha,
@@ -675,8 +686,8 @@ fn App(cx: Scope) -> Element {
                     &uniform_buffer,
                     0,
                     bytemuck::cast_slice(&current_scale.point_scale_to_uniform(
-                        output.texture.width(),
-                        output.texture.height(),
+                        canvas_outer_size.get().width as u32,
+                        canvas_outer_size.get().height as u32,
                         100,
                     )),
                 );
@@ -684,6 +695,13 @@ fn App(cx: Scope) -> Element {
                 // info!("{:?}", POINTS.as_ref());
                 info!("Matrices");
                 info!("{current_scale:?}");
+                my_str.modify(|_| {
+                    format!(
+                        "Transforms for {} x {}",
+                        canvas_outer_size.get().width as u32,
+                        canvas_outer_size.get().height as u32
+                    )
+                });
                 for mat in current_scale.point_scale_to_uniform(
                     canvas_outer_size.get().width as u32,
                     canvas_outer_size.get().height as u32,
