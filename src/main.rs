@@ -24,7 +24,9 @@ use wgpu::{
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
 use wgpu::{
-    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages, CompositeAlphaMode,
+    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages,
+    CompositeAlphaMode, Extent3d, SurfaceConfiguration, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages,
 };
 use winit::{
     event::*,
@@ -99,6 +101,13 @@ const VERTICES: &[Vertex] = &[
     }, // E
 ];
 
+const OFFSET_VERTICES: &[[f32; 2]] = &[[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
+
+const OFFSET_INDICES: &[u16] = &[
+    0, 1, 2, // Bottom left
+    1, 2, 3, // Top right
+];
+
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4, /* padding */ 0];
 
 #[repr(C)]
@@ -113,6 +122,8 @@ struct Point(f32, f32);
 //     Point(-0.5, -0.45),
 // ];
 
+// const POINTS: &[Point] = &[Point(-1.0, 0.0), Point(0.0, 1.0), Point(1.0, 0.0)];
+
 // Degenerate - reverse
 // const POINTS: &[Point] = &[
 //     Point(0.3, -0.7),
@@ -125,7 +136,7 @@ struct Point(f32, f32);
 
 // const POINTS: &[Point] = &[Point(-1.0, -1.0), Point(1.0, 1.0)];
 // const NUM_POINTS: usize = 134217728 / (8);
-const NUM_POINTS: usize = 100;
+const NUM_POINTS: usize = 20;
 
 lazy_static! {
     static ref POINTS: Vec<Point> = {
@@ -160,6 +171,16 @@ impl Vertex {
         }
     }
 }
+
+const offset_buffers_desc: &[wgpu::VertexBufferLayout] = &[wgpu::VertexBufferLayout {
+    array_stride: wgpu::VertexFormat::Float32x2.size() as wgpu::BufferAddress,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &[wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 0,
+        format: wgpu::VertexFormat::Float32x2,
+    }],
+}];
 
 // fn segmented_line_desc() -> wgpu::layout {
 //     wgpu::VertexBufferLayout {
@@ -346,7 +367,7 @@ fn App(cx: Scope) -> Element {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState {
-                    count: 1,
+                    count: 4,
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
@@ -362,86 +383,38 @@ fn App(cx: Scope) -> Element {
                     vertex: wgpu::VertexState {
                         module: &segment_shader,
                         entry_point: "vs_line",
-                        buffers: &[],
+                        buffers: offset_buffers_desc,
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &segment_shader,
                         entry_point: "fs_line",
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
-                            blend: Some(wgpu::BlendState {
-                                color: BlendComponent {
-                                    src_factor: BlendFactor::One,
-                                    dst_factor: BlendFactor::One,
-                                    operation: BlendOperation::Max,
-                                },
-                                alpha: BlendComponent {
-                                    src_factor: BlendFactor::One,
-                                    dst_factor: BlendFactor::One,
-                                    operation: BlendOperation::Max,
-                                },
-                            }),
                             // blend: Some(wgpu::BlendState {
                             //     color: BlendComponent {
-                            //         src_factor: BlendFactor::SrcAlpha,
-                            //         dst_factor: BlendFactor::DstAlpha,
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::Zero,
+                            //         operation: BlendOperation::Max,
+                            //     },
+                            //     alpha: BlendComponent {
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::Zero,
                             //         operation: BlendOperation::Add,
                             //     },
-                            //     alpha: BlendComponent::REPLACE,
                             // }),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
-                        // or Features::POLYGON_MODE_POINT
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        // Requires Features::DEPTH_CLIP_CONTROL
-                        unclipped_depth: false,
-                        // Requires Features::CONSERVATIVE_RASTERIZATION
-                        conservative: false,
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState {
-                        count: 1,
-                        mask: !0,
-                        alpha_to_coverage_enabled: false,
-                    },
-                    // If the pipeline will be used with a multiview render pass, this
-                    // indicates how many array layers the attachments will have.
-                    multiview: None,
-                });
-
-            let dot_render_pipeline =
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Dot Render Pipeline"),
-                    layout: Some(&segment_render_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &segment_shader,
-                        entry_point: "vs_dot",
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &segment_shader,
-                        entry_point: "fs_dot",
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: config.format,
-                            blend: Some(wgpu::BlendState {
-                                color: BlendComponent {
-                                    src_factor: BlendFactor::One,
-                                    dst_factor: BlendFactor::One,
-                                    operation: BlendOperation::Max,
-                                },
-                                alpha: BlendComponent {
-                                    src_factor: BlendFactor::One,
-                                    dst_factor: BlendFactor::One,
-                                    operation: BlendOperation::Max,
-                                },
-                            }),
+                            // blend: Some(wgpu::BlendState {
+                            //     color: BlendComponent {
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::One,
+                            //         operation: BlendOperation::Max,
+                            //     },
+                            //     alpha: BlendComponent {
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::One,
+                            //         operation: BlendOperation::Max,
+                            //     },
+                            // }),
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -460,7 +433,61 @@ fn App(cx: Scope) -> Element {
                     },
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState {
-                        count: 1,
+                        count: 4,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    // If the pipeline will be used with a multiview render pass, this
+                    // indicates how many array layers the attachments will have.
+                    multiview: None,
+                });
+
+            let dot_render_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Dot Render Pipeline"),
+                    layout: Some(&segment_render_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &segment_shader,
+                        entry_point: "vs_dot",
+                        buffers: offset_buffers_desc,
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &segment_shader,
+                        entry_point: "fs_dot",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            // blend: Some(wgpu::BlendState {
+                            //     color: BlendComponent {
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::One,
+                            //         operation: BlendOperation::Max,
+                            //     },
+                            //     alpha: BlendComponent {
+                            //         src_factor: BlendFactor::One,
+                            //         dst_factor: BlendFactor::One,
+                            //         operation: BlendOperation::Max,
+                            //     },
+                            // }),
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
+                        // or Features::POLYGON_MODE_POINT
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        // Requires Features::DEPTH_CLIP_CONTROL
+                        unclipped_depth: false,
+                        // Requires Features::CONSERVATIVE_RASTERIZATION
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState {
+                        count: 4,
                         mask: !0,
                         alpha_to_coverage_enabled: false,
                     },
@@ -480,6 +507,20 @@ fn App(cx: Scope) -> Element {
                 usage: wgpu::BufferUsages::INDEX,
             });
             let num_indices = INDICES.len() as u32;
+
+            let offset_vertex_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Offset Vertex Buffer"),
+                    contents: bytemuck::cast_slice(OFFSET_VERTICES),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+            let offset_index_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Offset Index Buffer"),
+                    contents: bytemuck::cast_slice(OFFSET_INDICES),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
             let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Point Buffer"),
@@ -679,7 +720,25 @@ fn App(cx: Scope) -> Element {
 
             let mut canvas_outer_size = Cell::new(ComponentSize::default());
 
-            let render = || -> Result<(), wgpu::SurfaceError> {
+            let mut create_multisample_texture = |config: &SurfaceConfiguration| -> Texture {
+                device.create_texture(&TextureDescriptor {
+                    label: Some("msaa"),
+                    size: Extent3d {
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: TextureDimension::D2,
+                    format: config.format,
+                    usage: TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+            };
+            let mut multisample_texture = RefCell::new(create_multisample_texture(&config));
+
+            let mut render = || -> Result<(), wgpu::SurfaceError> {
                 let output = surface.get_current_texture()?;
 
                 queue.write_buffer(
@@ -713,7 +772,10 @@ fn App(cx: Scope) -> Element {
                     );
                 }
 
-                let view = output
+                let multisample_view = multisample_texture
+                    .borrow()
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let final_view = output
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -725,8 +787,8 @@ fn App(cx: Scope) -> Element {
                     let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Render Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
+                            view: &multisample_view,
+                            resolve_target: Some(&final_view),
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color {
                                     r: 0.0,
@@ -748,10 +810,17 @@ fn App(cx: Scope) -> Element {
                     render_pass.draw_indexed(0..num_indices, 0, 0..1);
 
                     render_pass.set_bind_group(0, &line_bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, offset_vertex_buffer.slice(..));
+                    render_pass
+                        .set_index_buffer(offset_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.set_pipeline(&segment_render_pipeline);
-                    render_pass.draw(0..u32::try_from(2 * POINTS.len()).unwrap(), 0..1);
+                    render_pass.draw_indexed(
+                        0..6,
+                        0,
+                        0..(u32::try_from(POINTS.len()).unwrap() - 1),
+                    );
                     render_pass.set_pipeline(&dot_render_pipeline);
-                    render_pass.draw(0..u32::try_from(6 * POINTS.len()).unwrap(), 0..1);
+                    render_pass.draw_indexed(0..6, 0, 0..u32::try_from(POINTS.len()).unwrap());
                 }
 
                 queue.submit(iter::once(encoder.finish()));
@@ -779,6 +848,9 @@ fn App(cx: Scope) -> Element {
                             config.height = ((size.height as f64) * ratio) as u32;
 
                             surface.configure(&device, &config);
+                            let mut multisample_texture = multisample_texture.borrow_mut();
+                            multisample_texture.destroy();
+                            *multisample_texture = create_multisample_texture(&config);
                         }
                     }
 
