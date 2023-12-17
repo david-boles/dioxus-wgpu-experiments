@@ -6,6 +6,8 @@ const dot_radius: f32 = 4f*line_half_width;
 struct Uniforms {
     point_to_px: mat3x2f,
     px_to_raster: mat3x2f,
+    color: vec4f,
+    depth: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -68,7 +70,7 @@ fn vs_line(
 
     let corr_offset = (line_half_width * (mat2x2f(segment.tan_hat_px, segment.perp_hat_px)) * offset);
     // let corr_offset = (line_half_width * offset);
-    output.vertex_position = vec4f(uniforms.px_to_raster * vec3f(position_px + corr_offset, 1f), 0f, 1f);
+    output.vertex_position = vec4f(uniforms.px_to_raster * vec3f(position_px + corr_offset, 1f), uniforms.depth, 1f);
     output.segment_pos_px.x = segment_tan_pos_px + (line_half_width * offset.x);
     output.segment_pos_px.y = (line_half_width * offset.y);
     output.segment_len_px = segment.length_px;
@@ -93,18 +95,10 @@ fn vs_dot(
     let point_px = uniforms.point_to_px * vec3f(points[point_index], 1f);
 
     output.dot_pos_px = dot_radius * offset;
-    output.vertex_position = vec4f(uniforms.px_to_raster * vec3f(point_px + output.dot_pos_px, 1f), 0f, 1f);
+    output.vertex_position = vec4f(uniforms.px_to_raster * vec3f(point_px + output.dot_pos_px, 1f), uniforms.depth, 1f);
     
     return output;
 }
-
-const c1: vec3f = vec3f(0.0, 0.4470, 0.7410);
-const c2: vec3f = vec3f(0.8500, 0.3250, 0.0980);
-const c3: vec3f = vec3f(0.9290, 0.6940, 0.1250);
-const c4: vec3f = vec3f(0.4940, 0.1840, 0.5560);
-const c5: vec3f = vec3f(0.4660, 0.6740, 0.1880);
-const c6: vec3f = vec3f(0.3010, 0.7450, 0.9330);
-const c7: vec3f = vec3f(0.6350, 0.0780, 0.1840);
 
 // Fragment shader
 @fragment
@@ -123,9 +117,9 @@ fn fs_line(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // let alpha = 0.5f;
-    let alpha = 1f;
+    let alpha = 0.8f;
 
-    return vec4<f32>(alpha * c1, alpha);
+    return uniforms.color;
 }
 
 @fragment
@@ -134,7 +128,7 @@ fn fs_dot(in: DotOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let alpha = 1f;
+    let alpha = 0.8f;
 
-    return vec4<f32>(alpha * c1, alpha);
+    return uniforms.color;
 }

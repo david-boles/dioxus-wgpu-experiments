@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 use console_log::log;
+use dioxus::html::geometry::{PixelsVector, WheelDelta};
 // import the prelude to get access to the `rsx!` macro and the `Scope` and `Element` types
 use dioxus::prelude::*;
 // use dioxus_helmet::Helmet;
@@ -9,24 +10,26 @@ use js_sys::Math::random;
 use lazy_static::lazy_static;
 use log::info;
 use rand::{distributions::Uniform, Rng};
+use std::borrow::BorrowMut;
 use std::cell::Cell;
 use std::cmp::{max, min};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU16, NonZeroU64};
 use std::{
     iter,
     ops::{RangeInclusive, RangeToInclusive},
     sync::mpsc::TryRecvError,
 };
-use web_sys::HtmlCanvasElement;
+use web_sys::{HtmlCanvasElement, Text};
 use wgpu::{
     util::{DeviceExt, RenderEncoder},
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
 use wgpu::{
-    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages,
-    CompositeAlphaMode, Extent3d, SurfaceConfiguration, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages,
+    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages, CompareFunction,
+    CompositeAlphaMode, DepthBiasState, DepthStencilState, Extent3d, Operations,
+    RenderPassDepthStencilAttachment, StencilState, SurfaceConfiguration, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
 use winit::{
     event::*,
@@ -136,7 +139,7 @@ struct Point(f32, f32);
 
 // const POINTS: &[Point] = &[Point(-1.0, -1.0), Point(1.0, 1.0)];
 // const NUM_POINTS: usize = 134217728 / (8);
-const NUM_POINTS: usize = 20;
+const NUM_POINTS: usize = 10_000;
 
 lazy_static! {
     static ref POINTS: Vec<Point> = {
@@ -149,7 +152,25 @@ lazy_static! {
             })
             .collect()
     };
+    static ref POINTS2: Vec<Point> = {
+        (0..NUM_POINTS)
+            .map(|i| {
+                Point(
+                    1.5 * (((i as f32) / (NUM_POINTS as f32)) - 0.5),
+                    rand::thread_rng().sample(Uniform::from(-0.75..0.75)),
+                )
+            })
+            .collect()
+    };
 }
+
+const c1: [f32; 3] = [0.0, 0.4470, 0.7410];
+const c2: [f32; 3] = [0.8500, 0.3250, 0.0980];
+const c3: [f32; 3] = [0.9290, 0.6940, 0.1250];
+const c4: [f32; 3] = [0.4940, 0.1840, 0.5560];
+const c5: [f32; 3] = [0.4660, 0.6740, 0.1880];
+const c6: [f32; 3] = [0.3010, 0.7450, 0.9330];
+const c7: [f32; 3] = [0.6350, 0.0780, 0.1840];
 
 impl Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -202,6 +223,7 @@ const offset_buffers_desc: &[wgpu::VertexBufferLayout] = &[wgpu::VertexBufferLay
 // }
 
 enum CanvasEvent {
+    Wheel(PixelsVector),
     Resize(ComponentSize),
 }
 
@@ -307,11 +329,11 @@ fn App(cx: Scope) -> Element {
                     entries: &[
                         BindGroupLayoutEntry {
                             binding: 0, // TODO 0
-                            visibility: ShaderStages::VERTEX,
+                            visibility: ShaderStages::VERTEX_FRAGMENT,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
-                                min_binding_size: Some(NonZeroU64::new(12 * 4).unwrap()),
+                                min_binding_size: Some(NonZeroU64::new(80).unwrap()),
                             },
                             count: None,
                         },
@@ -334,6 +356,14 @@ fn App(cx: Scope) -> Element {
                     bind_group_layouts: &[&line_bind_group_layout],
                     push_constant_ranges: &[],
                 });
+
+            let depth_stencil = Some(DepthStencilState {
+                format: TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Greater, //TODO?
+                bias: Default::default(),
+                stencil: Default::default(),
+            });
 
             let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Render Pipeline"),
@@ -361,11 +391,11 @@ fn App(cx: Scope) -> Element {
                     // or Features::POLYGON_MODE_POINT
                     polygon_mode: wgpu::PolygonMode::Fill,
                     // Requires Features::DEPTH_CLIP_CONTROL
-                    unclipped_depth: false,
+                    unclipped_depth: true,
                     // Requires Features::CONSERVATIVE_RASTERIZATION
                     conservative: false,
                 },
-                depth_stencil: None,
+                depth_stencil: depth_stencil.clone(),
                 multisample: wgpu::MultisampleState {
                     count: 4,
                     mask: !0,
@@ -431,7 +461,7 @@ fn App(cx: Scope) -> Element {
                         // Requires Features::CONSERVATIVE_RASTERIZATION
                         conservative: false,
                     },
-                    depth_stencil: None,
+                    depth_stencil: depth_stencil.clone(),
                     multisample: wgpu::MultisampleState {
                         count: 4,
                         mask: !0,
@@ -485,7 +515,7 @@ fn App(cx: Scope) -> Element {
                         // Requires Features::CONSERVATIVE_RASTERIZATION
                         conservative: false,
                     },
-                    depth_stencil: None,
+                    depth_stencil,
                     multisample: wgpu::MultisampleState {
                         count: 4,
                         mask: !0,
@@ -528,9 +558,22 @@ fn App(cx: Scope) -> Element {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             });
 
+            let point_buffer2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Point Buffer"),
+                contents: bytemuck::cast_slice(&POINTS2),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            });
+
             let uniform_buffer = device.create_buffer(&BufferDescriptor {
                 label: Some("uniforms"),
-                size: 12 * 4,
+                size: 80,
+                usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                mapped_at_creation: false,
+            });
+
+            let uniform_buffer2 = device.create_buffer(&BufferDescriptor {
+                label: Some("uniforms"),
+                size: 80,
                 usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
                 mapped_at_creation: false,
             });
@@ -558,12 +601,35 @@ fn App(cx: Scope) -> Element {
                 layout: &line_bind_group_layout,
             });
 
+            let line_bind_group2 = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("segment bind group"),
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(BufferBinding {
+                            buffer: &uniform_buffer2,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(BufferBinding {
+                            buffer: &point_buffer2,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                ],
+                layout: &line_bind_group_layout,
+            });
+
             #[derive(Clone, Copy, Debug)]
             struct AxisScale {
                 /// First point's position in some axis in some space
-                start: f32,
+                pub start: f32,
                 /// Last point's position in some axis in some space
-                end: f32,
+                pub end: f32,
             }
 
             impl AxisScale {
@@ -571,13 +637,30 @@ fn App(cx: Scope) -> Element {
                     start: f32::NAN,
                     end: f32::NAN,
                 };
+
+                pub fn diff(&self) -> f32 {
+                    self.end - self.start
+                }
+
+                pub fn scale_pct(&mut self, percent: f32) {
+                    let diff = self.diff() * percent;
+                    let mid = self.start + (self.diff() / 2.0);
+                    self.start = mid - (diff / 2.0);
+                    self.end = mid + (diff / 2.0);
+                }
+
+                pub fn shift_pct(&mut self, percent: f32) {
+                    let diff = self.diff() * percent;
+                    self.start += diff;
+                    self.end += diff
+                }
             }
 
             /// The scale of a set of points in some space
             #[derive(Clone, Copy, Debug)]
             struct Scale {
-                horizontal: AxisScale,
-                vertical: AxisScale,
+                pub horizontal: AxisScale,
+                pub vertical: AxisScale,
             }
 
             impl Scale {
@@ -599,15 +682,15 @@ fn App(cx: Scope) -> Element {
 
                 /// WGSL mat3x2f (2x3) to convert from a scale in one space to a scale in another space.
                 pub fn transform_matrix(from: Scale, to: Scale) -> [f32; 6] {
-                    info!("transform");
-                    info!("{from:?}");
-                    info!("{to:?}");
+                    // info!("transform");
+                    // info!("{from:?}");
+                    // info!("{to:?}");
                     let h_scale = (to.horizontal.end - to.horizontal.start)
                         / (from.horizontal.end - from.horizontal.start);
                     let v_scale = (to.vertical.end - to.vertical.start)
                         / (from.vertical.end - from.vertical.start);
-                    info!("{h_scale}");
-                    info!("{v_scale}");
+                    // info!("{h_scale}");
+                    // info!("{v_scale}");
                     [
                         h_scale,
                         0.0,
@@ -627,7 +710,10 @@ fn App(cx: Scope) -> Element {
                     px_width: u32,
                     px_height: u32,
                     px_margin: u32,
-                ) -> [[f32; 6]; 2] {
+                    color: &[f32; 3],
+                    alpha: f32,
+                    depth_ind: NonZeroU16,
+                ) -> Vec<f32> {
                     let px_width = px_width as f32;
                     let px_height = px_height as f32;
                     let px_margin = px_margin as f32;
@@ -680,24 +766,33 @@ fn App(cx: Scope) -> Element {
                     //     [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
                     // ];
 
-                    return [
-                        self.transform_matrix_to(px_scale_with_margin),
-                        px_scale.transform_matrix_to(Scale::RASTER),
-                    ];
+                    let mut out = Vec::new();
+                    out.extend_from_slice(&self.transform_matrix_to(px_scale_with_margin));
+                    out.extend_from_slice(&px_scale.transform_matrix_to(Scale::RASTER));
+                    out.extend(color.map(|c| c * alpha)); // Premultiply
+                    out.push(alpha);
+                    out.push((depth_ind.get() as f32) / (2f32.powi(16)));
+                    out.push(0.0); // padding
+
+                    return out;
                 }
             }
 
-            let mut current_scale = {
-                let mut initial_scale = POINTS.iter().fold(Scale::NAN, |scale, point| Scale {
-                    horizontal: AxisScale {
-                        start: f32_min(scale.horizontal.start, point.0),
-                        end: f32_max(scale.horizontal.end, point.0),
-                    },
-                    vertical: AxisScale {
-                        start: f32_min(scale.vertical.start, point.1),
-                        end: f32_max(scale.vertical.end, point.1),
-                    },
-                });
+            let mut current_scale = RefCell::new({
+                let mut initial_scale =
+                    POINTS
+                        .iter()
+                        .chain(POINTS2.iter())
+                        .fold(Scale::NAN, |scale, point| Scale {
+                            horizontal: AxisScale {
+                                start: f32_min(scale.horizontal.start, point.0),
+                                end: f32_max(scale.horizontal.end, point.0),
+                            },
+                            vertical: AxisScale {
+                                start: f32_min(scale.vertical.start, point.1),
+                                end: f32_max(scale.vertical.end, point.1),
+                            },
+                        });
 
                 for axis in [&mut initial_scale.horizontal, &mut initial_scale.vertical] {
                     if axis.start.is_finite() {
@@ -716,7 +811,7 @@ fn App(cx: Scope) -> Element {
                 }
 
                 initial_scale
-            };
+            });
 
             let mut canvas_outer_size = Cell::new(ComponentSize::default());
 
@@ -738,22 +833,56 @@ fn App(cx: Scope) -> Element {
             };
             let mut multisample_texture = RefCell::new(create_multisample_texture(&config));
 
+            let mut create_depth_texture = |config: &SurfaceConfiguration| -> Texture {
+                device.create_texture(&TextureDescriptor {
+                    label: Some("depth"),
+                    size: Extent3d {
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Depth24Plus,
+                    usage: TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+            };
+            let mut depth_texture = RefCell::new(create_depth_texture(&config));
+
             let mut render = || -> Result<(), wgpu::SurfaceError> {
                 let output = surface.get_current_texture()?;
 
                 queue.write_buffer(
                     &uniform_buffer,
                     0,
-                    bytemuck::cast_slice(&current_scale.point_scale_to_uniform(
+                    bytemuck::cast_slice(&current_scale.borrow().point_scale_to_uniform(
                         canvas_outer_size.get().width as u32,
                         canvas_outer_size.get().height as u32,
                         100,
+                        &c1,
+                        0.5,
+                        NonZeroU16::new(1).unwrap(),
+                    )),
+                );
+
+                queue.write_buffer(
+                    &uniform_buffer2,
+                    0,
+                    bytemuck::cast_slice(&current_scale.borrow().point_scale_to_uniform(
+                        canvas_outer_size.get().width as u32,
+                        canvas_outer_size.get().height as u32,
+                        100,
+                        &c2,
+                        0.5,
+                        NonZeroU16::new(2).unwrap(),
                     )),
                 );
 
                 // info!("{:?}", POINTS.as_ref());
-                info!("Matrices");
-                info!("{current_scale:?}");
+                // info!("Matrices");
+                // info!("{current_scale:?}");
                 my_str.modify(|_| {
                     format!(
                         "Transforms for {} x {}",
@@ -761,18 +890,21 @@ fn App(cx: Scope) -> Element {
                         canvas_outer_size.get().height as u32
                     )
                 });
-                for mat in current_scale.point_scale_to_uniform(
-                    canvas_outer_size.get().width as u32,
-                    canvas_outer_size.get().height as u32,
-                    0,
-                ) {
-                    info!(
-                        "{{{{{}, {}, {}}},{{{}, {}, {}}}}}",
-                        mat[0], mat[2], mat[4], mat[1], mat[3], mat[5]
-                    );
-                }
+                // for mat in current_scale.point_scale_to_uniform(
+                //     canvas_outer_size.get().width as u32,
+                //     canvas_outer_size.get().height as u32,
+                //     0,
+                // ) {
+                //     // info!(
+                //     //     "{{{{{}, {}, {}}},{{{}, {}, {}}}}}",
+                //     //     mat[0], mat[2], mat[4], mat[1], mat[3], mat[5]
+                //     // );
+                // }
 
                 let multisample_view = multisample_texture
+                    .borrow()
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let depth_view = depth_texture
                     .borrow()
                     .create_view(&wgpu::TextureViewDescriptor::default());
                 let final_view = output
@@ -799,7 +931,11 @@ fn App(cx: Scope) -> Element {
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                            depth_ops: Some(Operations::default()),
+                            stencil_ops: None,
+                            view: &depth_view, // TODO
+                        }),
                         occlusion_query_set: None,
                         timestamp_writes: None,
                     });
@@ -809,18 +945,22 @@ fn App(cx: Scope) -> Element {
                     render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..num_indices, 0, 0..1);
 
-                    render_pass.set_bind_group(0, &line_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, offset_vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(offset_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                    render_pass.set_pipeline(&segment_render_pipeline);
-                    render_pass.draw_indexed(
-                        0..6,
-                        0,
-                        0..(u32::try_from(POINTS.len()).unwrap() - 1),
-                    );
-                    render_pass.set_pipeline(&dot_render_pipeline);
-                    render_pass.draw_indexed(0..6, 0, 0..u32::try_from(POINTS.len()).unwrap());
+                    for bind_group in [&line_bind_group, &line_bind_group2] {
+                        render_pass.set_bind_group(0, bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, offset_vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(
+                            offset_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        render_pass.set_pipeline(&segment_render_pipeline);
+                        render_pass.draw_indexed(
+                            0..6,
+                            0,
+                            0..(u32::try_from(POINTS.len()).unwrap() - 1),
+                        );
+                        render_pass.set_pipeline(&dot_render_pipeline);
+                        render_pass.draw_indexed(0..6, 0, 0..u32::try_from(POINTS.len()).unwrap());
+                    }
                 }
 
                 queue.submit(iter::once(encoder.finish()));
@@ -843,14 +983,29 @@ fn App(cx: Scope) -> Element {
                             let ratio = web_sys::window().unwrap().device_pixel_ratio();
                             // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
                             // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
-                            // let ratio = 0.1;
+                            // let ratio = 0.5;
                             config.width = ((size.width as f64) * ratio) as u32;
                             config.height = ((size.height as f64) * ratio) as u32;
 
                             surface.configure(&device, &config);
+
                             let mut multisample_texture = multisample_texture.borrow_mut();
                             multisample_texture.destroy();
                             *multisample_texture = create_multisample_texture(&config);
+
+                            let mut depth_texture = depth_texture.borrow_mut();
+                            depth_texture.destroy();
+                            *depth_texture = create_depth_texture(&config);
+                        }
+                        CanvasEvent::Wheel(delta) => {
+                            // info!("{:?}", delta);
+                            let mut current_scale = current_scale.borrow_mut();
+                            current_scale
+                                .horizontal
+                                .scale_pct(f32::exp(0.01 * delta.y as f32));
+                            current_scale.horizontal.shift_pct(
+                                (delta.x as f32) / (canvas_outer_size.get().width as f32),
+                            );
                         }
                     }
 
@@ -864,7 +1019,7 @@ fn App(cx: Scope) -> Element {
                         Err(_) => {
                             render().unwrap();
 
-                            log::info!("rendered changes for {count} events!");
+                            // log::info!("rendered changes for {count} events!");
                             continue 'wait_for_events;
                         }
                         _ => todo!("component unloaded"),
@@ -901,6 +1056,12 @@ fn App(cx: Scope) -> Element {
                     background: "#222",
                     onmounted: |event| {
                         on_resize.mount(event);
+                    },
+                    onwheel: |event: dioxus::core::Event<WheelData>| {
+                        if let WheelDelta::Pixels(pixels) = event.delta() {
+                            render_coroutine.send(CanvasEvent::Wheel(pixels))
+                        }
+                        event.stop_propagation()
                     }
                 }
             }
