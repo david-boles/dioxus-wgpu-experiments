@@ -14,12 +14,13 @@ use std::borrow::BorrowMut;
 use std::cell::Cell;
 use std::cmp::{max, min};
 use std::num::{NonZeroU16, NonZeroU64};
+use std::rc::Rc;
 use std::{
     iter,
     ops::{RangeInclusive, RangeToInclusive},
     sync::mpsc::TryRecvError,
 };
-use web_sys::{HtmlCanvasElement, Text};
+use web_sys::{HtmlCanvasElement, Text, Window};
 use wgpu::{
     util::{DeviceExt, RenderEncoder},
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -169,6 +170,7 @@ pub enum CanvasEvent {
 pub struct Plot {
     device: Device,
     surface: Surface,
+    config: RefCell<SurfaceConfiguration>,
     queue: Queue,
     current_scale: RefCell<Scale>,
     canvas_outer_size: Cell<ComponentSize>,
@@ -183,14 +185,12 @@ pub struct Plot {
     depth_texture: RefCell<Texture>,
     segment_render_pipeline: RenderPipeline,
     dot_render_pipeline: RenderPipeline,
+    animation_frame_requested_but_render_not_queued: Cell<bool>,
 }
 
 impl Plot {
     // create a component that renders a div with the text "Hello, world!"
-    pub async fn render_coroutine(
-        mut rx: UnboundedReceiver<CanvasEvent>,
-        my_str: UseState<String>,
-    ) {
+    pub async fn new(my_str: UseState<String>) -> Rc<Plot> {
         my_str.modify(|_| "begun".to_owned());
         let canvas = web_sys::window()
             .unwrap()
@@ -553,47 +553,15 @@ impl Plot {
 
         let mut canvas_outer_size = Cell::new(ComponentSize::default());
 
-        let mut create_multisample_texture =
-            |device: &Device, config: &SurfaceConfiguration| -> Texture {
-                device.create_texture(&TextureDescriptor {
-                    label: Some("msaa"),
-                    size: Extent3d {
-                        width: config.width,
-                        height: config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 4,
-                    dimension: TextureDimension::D2,
-                    format: config.format,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                })
-            };
-        let mut multisample_texture = RefCell::new(create_multisample_texture(&device, &config));
+        let mut multisample_texture =
+            RefCell::new(Self::create_multisample_texture(&device, &config));
 
-        let mut create_depth_texture =
-            |device: &Device, config: &SurfaceConfiguration| -> Texture {
-                device.create_texture(&TextureDescriptor {
-                    label: Some("depth"),
-                    size: Extent3d {
-                        width: config.width,
-                        height: config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 4,
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::Depth24Plus,
-                    usage: TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                })
-            };
-        let mut depth_texture = RefCell::new(create_depth_texture(&device, &config));
+        let mut depth_texture = RefCell::new(Self::create_depth_texture(&device, &config));
 
         let plot = Plot {
             device,
             surface,
+            config: RefCell::new(config),
             queue,
             current_scale,
             canvas_outer_size,
@@ -608,11 +576,57 @@ impl Plot {
             depth_texture,
             segment_render_pipeline,
             dot_render_pipeline,
+            animation_frame_requested_but_render_not_queued: Cell::new(false),
         };
 
         plot.queue_render().unwrap();
 
         plot.my_str.modify(|_| "success!".to_owned());
+
+        return Rc::new(plot);
+    }
+
+    fn create_multisample_texture(device: &Device, config: &SurfaceConfiguration) -> Texture {
+        device.create_texture(&TextureDescriptor {
+            label: Some("msaa"),
+            size: Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 4,
+            dimension: TextureDimension::D2,
+            format: config.format,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    }
+
+    fn create_depth_texture(device: &Device, config: &SurfaceConfiguration) -> Texture {
+        device.create_texture(&TextureDescriptor {
+            label: Some("depth"),
+            size: Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 4,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth24Plus,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    }
+
+    pub async fn start_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
+        let window = web_sys::window().unwrap();
+
+        let queue_render_js_closure = {
+            let plot = self.clone();
+            Closure::<dyn Fn() -> ()>::new(move || plot.queue_render().unwrap()).into_js_value()
+        };
 
         'wait_for_events: loop {
             let mut event = rx.next().await.expect("always some");
@@ -620,32 +634,34 @@ impl Plot {
             'process_events: loop {
                 match event {
                     CanvasEvent::Resize(size) => {
-                        plot.canvas_outer_size.set(size);
+                        self.canvas_outer_size.set(size);
                         let ratio = web_sys::window().unwrap().device_pixel_ratio();
                         // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
                         // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
                         // let ratio = 0.5;
-                        config.width = ((size.width as f64) * ratio) as u32;
-                        config.height = ((size.height as f64) * ratio) as u32;
+                        self.config.borrow_mut().width = ((size.width as f64) * ratio) as u32;
+                        self.config.borrow_mut().height = ((size.height as f64) * ratio) as u32;
 
-                        plot.surface.configure(&plot.device, &config);
+                        self.surface.configure(&self.device, &self.config.borrow());
 
-                        let mut multisample_texture = plot.multisample_texture.borrow_mut();
+                        let mut multisample_texture = self.multisample_texture.borrow_mut();
                         multisample_texture.destroy();
-                        *multisample_texture = create_multisample_texture(&plot.device, &config);
+                        *multisample_texture =
+                            Self::create_multisample_texture(&self.device, &self.config.borrow());
 
-                        let mut depth_texture = plot.depth_texture.borrow_mut();
+                        let mut depth_texture = self.depth_texture.borrow_mut();
                         depth_texture.destroy();
-                        *depth_texture = create_depth_texture(&plot.device, &config);
+                        *depth_texture =
+                            Self::create_depth_texture(&self.device, &self.config.borrow());
                     }
                     CanvasEvent::Wheel(delta) => {
                         // info!("{:?}", delta);
-                        let mut current_scale = plot.current_scale.borrow_mut();
+                        let mut current_scale = self.current_scale.borrow_mut();
                         current_scale
                             .horizontal
                             .scale_pct(f32::exp(0.01 * delta.y as f32));
                         current_scale.horizontal.shift_pct(
-                            (delta.x as f32) / (plot.canvas_outer_size.get().width as f32),
+                            (delta.x as f32) / (self.canvas_outer_size.get().width as f32),
                         );
                     }
                 }
@@ -658,7 +674,14 @@ impl Plot {
                     }
                     // Error indicates no event ready for processing
                     Err(_) => {
-                        plot.queue_render().unwrap();
+                        if !self.animation_frame_requested_but_render_not_queued.get() {
+                            window
+                                .request_animation_frame(queue_render_js_closure.unchecked_ref())
+                                .unwrap();
+                            self.animation_frame_requested_but_render_not_queued
+                                .set(true);
+                        }
+                        // self.queue_render().unwrap();
 
                         // log::info!("rendered changes for {count} events!");
                         continue 'wait_for_events;
@@ -670,6 +693,9 @@ impl Plot {
     }
 
     fn queue_render(&self) -> Result<(), wgpu::SurfaceError> {
+        self.animation_frame_requested_but_render_not_queued
+            .set(false);
+
         let output = self.surface.get_current_texture()?;
 
         self.queue.write_buffer(

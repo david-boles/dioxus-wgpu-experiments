@@ -57,9 +57,11 @@ fn main() {
 fn App(cx: Scope) -> Element {
     let my_str = use_state(cx, || "Hello world!".to_owned());
 
+    // let plot = use_state(cx, || None);
+
     let render_coroutine = use_coroutine(cx, |mut rx: UnboundedReceiver<CanvasEvent>| {
         to_owned![my_str];
-        async move { Plot::render_coroutine(rx, my_str).await }
+        async move { Plot::new(my_str).await.start_event_loop(rx).await }
     });
 
     let size = use_ref(cx, ComponentSize::default);
