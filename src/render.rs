@@ -26,10 +26,11 @@ use wgpu::{
     BindGroupLayoutEntry, BufferBinding, ShaderStages,
 };
 use wgpu::{
-    BlendComponent, BlendFactor, BlendOperation, BufferDescriptor, BufferUsages, CompareFunction,
-    CompositeAlphaMode, DepthBiasState, DepthStencilState, Extent3d, Operations,
-    RenderPassDepthStencilAttachment, StencilState, SurfaceConfiguration, Texture,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    BindGroup, BlendComponent, BlendFactor, BlendOperation, Buffer, BufferDescriptor, BufferUsages,
+    CompareFunction, CompositeAlphaMode, DepthBiasState, DepthStencilState, Device, Extent3d,
+    Operations, PipelineLayout, Queue, RenderPassDepthStencilAttachment, RenderPipeline,
+    StencilState, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages,
 };
 use winit::{
     event::*,
@@ -37,6 +38,10 @@ use winit::{
     raw_window_handle::{WebCanvasWindowHandle, WebWindowHandle},
     window::WindowBuilder,
 };
+
+use scale::*;
+
+mod scale;
 
 use wasm_bindgen::prelude::*;
 
@@ -161,566 +166,518 @@ pub enum CanvasEvent {
     Resize(ComponentSize),
 }
 
-// create a component that renders a div with the text "Hello, world!"
-pub async fn render_coroutine(mut rx: UnboundedReceiver<CanvasEvent>, my_str: UseState<String>) {
-    my_str.modify(|_| "begun".to_owned());
-    let canvas = web_sys::window()
-        .unwrap()
-        .document()
-        .unwrap()
-        .get_element_by_id("my-canvas")
-        .unwrap()
-        .dyn_into::<HtmlCanvasElement>()
-        .unwrap();
+pub struct Plot {
+    device: Device,
+    surface: Surface,
+    queue: Queue,
+    current_scale: RefCell<Scale>,
+    canvas_outer_size: Cell<ComponentSize>,
+    my_str: UseState<String>,
+    offset_vertex_buffer: Buffer,
+    offset_index_buffer: Buffer,
+    uniform_buffer: Buffer,
+    uniform_buffer2: Buffer,
+    line_bind_group: BindGroup,
+    line_bind_group2: BindGroup,
+    multisample_texture: RefCell<Texture>,
+    depth_texture: RefCell<Texture>,
+    segment_render_pipeline: RenderPipeline,
+    dot_render_pipeline: RenderPipeline,
+}
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..Default::default()
-    });
+impl Plot {
+    // create a component that renders a div with the text "Hello, world!"
+    pub async fn render_coroutine(
+        mut rx: UnboundedReceiver<CanvasEvent>,
+        my_str: UseState<String>,
+    ) {
+        my_str.modify(|_| "begun".to_owned());
+        let canvas = web_sys::window()
+            .unwrap()
+            .document()
+            .unwrap()
+            .get_element_by_id("my-canvas")
+            .unwrap()
+            .dyn_into::<HtmlCanvasElement>()
+            .unwrap();
 
-    let surface = unsafe {
-        instance.create_surface_from_canvas(HtmlCanvasElement::try_from(canvas.clone()).unwrap())
-    }
-    .unwrap();
-
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        })
-        .await
-        .unwrap();
-
-    let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                features: wgpu::Features::empty(),
-                // WebGL doesn't support all of wgpu's features, so if
-                // we're building for the web we'll have to disable some.
-                limits: wgpu::Limits::default(),
-            },
-            None, // Trace path
-        )
-        .await
-        .unwrap();
-
-    let surface_caps = surface.get_capabilities(&adapter);
-
-    let surface_format = surface_caps
-        .formats
-        .iter()
-        .copied()
-        .find(|f| f.is_srgb())
-        .unwrap_or(surface_caps.formats[0]);
-
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: surface_format,
-        width: canvas.width(),
-        height: canvas.height(),
-        present_mode: wgpu::PresentMode::AutoVsync,
-        alpha_mode: CompositeAlphaMode::PreMultiplied,
-        view_formats: vec![],
-    };
-    surface.configure(&device, &config);
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-    });
-
-    let segment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("SegmentShader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("segmented_line.wgsl").into()),
-    });
-
-    let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Render Pipeline Layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-
-    let line_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("segment bind group layout"),
-        entries: &[
-            BindGroupLayoutEntry {
-                binding: 0, // TODO 0
-                visibility: ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: Some(NonZeroU64::new(80).unwrap()),
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: 1, // TODO 0
-                visibility: ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let segment_render_pipeline_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Segment Render Pipeline Layout"),
-            bind_group_layouts: &[&line_bind_group_layout],
-            push_constant_ranges: &[],
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
         });
 
-    let depth_stencil = Some(DepthStencilState {
-        format: TextureFormat::Depth24Plus,
-        depth_write_enabled: true,
-        depth_compare: CompareFunction::Greater, //TODO?
-        bias: Default::default(),
-        stencil: Default::default(),
-    });
+        let surface = unsafe {
+            instance
+                .create_surface_from_canvas(HtmlCanvasElement::try_from(canvas.clone()).unwrap())
+        }
+        .unwrap();
 
-    let segment_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Segment Render Pipeline"),
-        layout: Some(&segment_render_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &segment_shader,
-            entry_point: "vs_line",
-            buffers: offset_buffers_desc,
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &segment_shader,
-            entry_point: "fs_line",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: config.format,
-                // blend: Some(wgpu::BlendState {
-                //     color: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::Zero,
-                //         operation: BlendOperation::Max,
-                //     },
-                //     alpha: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::Zero,
-                //         operation: BlendOperation::Add,
-                //     },
-                // }),
-                // blend: Some(wgpu::BlendState {
-                //     color: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::One,
-                //         operation: BlendOperation::Max,
-                //     },
-                //     alpha: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::One,
-                //         operation: BlendOperation::Max,
-                //     },
-                // }),
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
-            // or Features::POLYGON_MODE_POINT
-            polygon_mode: wgpu::PolygonMode::Fill,
-            // Requires Features::DEPTH_CLIP_CONTROL
-            unclipped_depth: false,
-            // Requires Features::CONSERVATIVE_RASTERIZATION
-            conservative: false,
-        },
-        depth_stencil: depth_stencil.clone(),
-        multisample: wgpu::MultisampleState {
-            count: 4,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        // If the pipeline will be used with a multiview render pass, this
-        // indicates how many array layers the attachments will have.
-        multiview: None,
-    });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
 
-    let dot_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Dot Render Pipeline"),
-        layout: Some(&segment_render_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &segment_shader,
-            entry_point: "vs_dot",
-            buffers: offset_buffers_desc,
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &segment_shader,
-            entry_point: "fs_dot",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: config.format,
-                // blend: Some(wgpu::BlendState {
-                //     color: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::One,
-                //         operation: BlendOperation::Max,
-                //     },
-                //     alpha: BlendComponent {
-                //         src_factor: BlendFactor::One,
-                //         dst_factor: BlendFactor::One,
-                //         operation: BlendOperation::Max,
-                //     },
-                // }),
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
-            // or Features::POLYGON_MODE_POINT
-            polygon_mode: wgpu::PolygonMode::Fill,
-            // Requires Features::DEPTH_CLIP_CONTROL
-            unclipped_depth: false,
-            // Requires Features::CONSERVATIVE_RASTERIZATION
-            conservative: false,
-        },
-        depth_stencil,
-        multisample: wgpu::MultisampleState {
-            count: 4,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        // If the pipeline will be used with a multiview render pass, this
-        // indicates how many array layers the attachments will have.
-        multiview: None,
-    });
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    features: wgpu::Features::empty(),
+                    // WebGL doesn't support all of wgpu's features, so if
+                    // we're building for the web we'll have to disable some.
+                    limits: wgpu::Limits::default(),
+                },
+                None, // Trace path
+            )
+            .await
+            .unwrap();
 
-    let offset_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Offset Vertex Buffer"),
-        contents: bytemuck::cast_slice(OFFSET_VERTICES),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+        let surface_caps = surface.get_capabilities(&adapter);
 
-    let offset_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Offset Index Buffer"),
-        contents: bytemuck::cast_slice(OFFSET_INDICES),
-        usage: wgpu::BufferUsages::INDEX,
-    });
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(surface_caps.formats[0]);
 
-    let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Point Buffer"),
-        contents: bytemuck::cast_slice(&POINTS),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-    });
-
-    let point_buffer2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Point Buffer"),
-        contents: bytemuck::cast_slice(&POINTS2),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-    });
-
-    let uniform_buffer = device.create_buffer(&BufferDescriptor {
-        label: Some("uniforms"),
-        size: 80,
-        usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-        mapped_at_creation: false,
-    });
-
-    let uniform_buffer2 = device.create_buffer(&BufferDescriptor {
-        label: Some("uniforms"),
-        size: 80,
-        usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-        mapped_at_creation: false,
-    });
-
-    let line_bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("segment bind group"),
-        entries: &[
-            BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: &uniform_buffer,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: &point_buffer,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-        ],
-        layout: &line_bind_group_layout,
-    });
-
-    let line_bind_group2 = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("segment bind group"),
-        entries: &[
-            BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: &uniform_buffer2,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(BufferBinding {
-                    buffer: &point_buffer2,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-        ],
-        layout: &line_bind_group_layout,
-    });
-
-    #[derive(Clone, Copy, Debug)]
-    struct AxisScale {
-        /// First point's position in some axis in some space
-        pub start: f32,
-        /// Last point's position in some axis in some space
-        pub end: f32,
-    }
-
-    impl AxisScale {
-        const NAN: Self = Self {
-            start: f32::NAN,
-            end: f32::NAN,
+        let mut config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: canvas.width(),
+            height: canvas.height(),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: CompositeAlphaMode::PreMultiplied,
+            view_formats: vec![],
         };
+        surface.configure(&device, &config);
 
-        pub fn diff(&self) -> f32 {
-            self.end - self.start
-        }
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
 
-        pub fn scale_pct(&mut self, percent: f32) {
-            let diff = self.diff() * percent;
-            let mid = self.start + (self.diff() / 2.0);
-            self.start = mid - (diff / 2.0);
-            self.end = mid + (diff / 2.0);
-        }
+        let segment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SegmentShader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("segmented_line.wgsl").into()),
+        });
 
-        pub fn shift_pct(&mut self, percent: f32) {
-            let diff = self.diff() * percent;
-            self.start += diff;
-            self.end += diff
-        }
-    }
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
 
-    /// The scale of a set of points in some space
-    #[derive(Clone, Copy, Debug)]
-    struct Scale {
-        pub horizontal: AxisScale,
-        pub vertical: AxisScale,
-    }
-
-    impl Scale {
-        const NAN: Self = Self {
-            horizontal: AxisScale::NAN,
-            vertical: AxisScale::NAN,
-        };
-
-        const RASTER: Self = Self {
-            horizontal: AxisScale {
-                start: -1.0,
-                end: 1.0,
-            },
-            vertical: AxisScale {
-                start: -1.0,
-                end: 1.0,
-            },
-        };
-
-        /// WGSL mat3x2f (2x3) to convert from a scale in one space to a scale in another space.
-        pub fn transform_matrix(from: Scale, to: Scale) -> [f32; 6] {
-            // info!("transform");
-            // info!("{from:?}");
-            // info!("{to:?}");
-            let h_scale = (to.horizontal.end - to.horizontal.start)
-                / (from.horizontal.end - from.horizontal.start);
-            let v_scale =
-                (to.vertical.end - to.vertical.start) / (from.vertical.end - from.vertical.start);
-            // info!("{h_scale}");
-            // info!("{v_scale}");
-            [
-                h_scale,
-                0.0,
-                0.0,
-                v_scale,
-                to.horizontal.start - (from.horizontal.start * h_scale),
-                to.vertical.start - (from.vertical.start * v_scale),
-            ]
-        }
-
-        pub fn transform_matrix_to(&self, to: Scale) -> [f32; 6] {
-            Self::transform_matrix(*self, to)
-        }
-
-        pub fn point_scale_to_uniform(
-            &self,
-            px_width: u32,
-            px_height: u32,
-            px_margin: u32,
-            color: &[f32; 3],
-            alpha: f32,
-            depth_ind: NonZeroU16,
-        ) -> Vec<f32> {
-            let px_width = px_width as f32;
-            let px_height = px_height as f32;
-            let px_margin = px_margin as f32;
-            let px_scale = Scale {
-                horizontal: AxisScale {
-                    start: 0.0,
-                    end: (px_width - 1.0),
-                },
-                vertical: AxisScale {
-                    start: (px_height - 1.0),
-                    end: 0.0,
-                },
-            };
-            let px_scale_with_margin = Scale {
-                horizontal: AxisScale {
-                    start: px_scale.horizontal.start + px_margin,
-                    end: px_scale.horizontal.end - px_margin,
-                },
-                vertical: AxisScale {
-                    start: px_scale.vertical.start - px_margin,
-                    end: px_scale.vertical.end + px_margin,
-                },
-            };
-
-            // {{605.5, 0, 605.5},{0, -445.5, 445.5}}
-            // {{0.0016515277, 0, -1},{0, -0.002244669, 1}}
-
-            // Matrix computed for -1,-1 to 1, 1
-            // return [
-            //     [605.5, 0.0, 0.0, -445.5, 605.5, 445.5],
-            //     [0.0016515277, 0.0, 0.0, -0.002244669, -1.0, 1.0],
-            // ];
-
-            // Random matrix and inverse
-            // let det = 915.0;
-            // return [
-            //     [24.0, 51.0, -17.0, 2.0, -6.0, 12.0],
-            //     [
-            //         2.0 / det,
-            //         -51.0 / det,
-            //         17.0 / det,
-            //         24.0 / det,
-            //         -192.0 / det,
-            //         -594.0 / det,
-            //     ],
-            // ];
-
-            // return [
-            //     [1.0, 0.0, 0.0, 1.0, -1.0, 0.0],
-            //     [1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-            // ];
-
-            let mut out = Vec::new();
-            out.extend_from_slice(&self.transform_matrix_to(px_scale_with_margin));
-            out.extend_from_slice(&px_scale.transform_matrix_to(Scale::RASTER));
-            out.extend(color.map(|c| c * alpha)); // Premultiply
-            out.push(alpha);
-            out.push((depth_ind.get() as f32) / (2f32.powi(16)));
-            out.push(0.0); // padding
-
-            return out;
-        }
-    }
-
-    let mut current_scale = RefCell::new({
-        let mut initial_scale =
-            POINTS
-                .iter()
-                .chain(POINTS2.iter())
-                .fold(Scale::NAN, |scale, point| Scale {
-                    horizontal: AxisScale {
-                        start: f32_min(scale.horizontal.start, point.0),
-                        end: f32_max(scale.horizontal.end, point.0),
+        let line_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("segment bind group layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0, // TODO 0
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(NonZeroU64::new(80).unwrap()),
                     },
-                    vertical: AxisScale {
-                        start: f32_min(scale.vertical.start, point.1),
-                        end: f32_max(scale.vertical.end, point.1),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1, // TODO 0
+                    visibility: ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                });
+                    count: None,
+                },
+            ],
+        });
 
-        for axis in [&mut initial_scale.horizontal, &mut initial_scale.vertical] {
-            if axis.start.is_finite() {
-                if axis.start == axis.end {
+        let segment_render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Segment Render Pipeline Layout"),
+                bind_group_layouts: &[&line_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let depth_stencil = Some(DepthStencilState {
+            format: TextureFormat::Depth24Plus,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Greater, //TODO?
+            bias: Default::default(),
+            stencil: Default::default(),
+        });
+
+        let segment_render_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Segment Render Pipeline"),
+                layout: Some(&segment_render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &segment_shader,
+                    entry_point: "vs_line",
+                    buffers: offset_buffers_desc,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &segment_shader,
+                    entry_point: "fs_line",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        // blend: Some(wgpu::BlendState {
+                        //     color: BlendComponent {
+                        //         src_factor: BlendFactor::One,
+                        //         dst_factor: BlendFactor::Zero,
+                        //         operation: BlendOperation::Max,
+                        //     },
+                        //     alpha: BlendComponent {
+                        //         src_factor: BlendFactor::One,
+                        //         dst_factor: BlendFactor::Zero,
+                        //         operation: BlendOperation::Add,
+                        //     },
+                        // }),
+                        // blend: Some(wgpu::BlendState {
+                        //     color: BlendComponent {
+                        //         src_factor: BlendFactor::One,
+                        //         dst_factor: BlendFactor::One,
+                        //         operation: BlendOperation::Max,
+                        //     },
+                        //     alpha: BlendComponent {
+                        //         src_factor: BlendFactor::One,
+                        //         dst_factor: BlendFactor::One,
+                        //         operation: BlendOperation::Max,
+                        //     },
+                        // }),
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
+                    // or Features::POLYGON_MODE_POINT
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    // Requires Features::DEPTH_CLIP_CONTROL
+                    unclipped_depth: false,
+                    // Requires Features::CONSERVATIVE_RASTERIZATION
+                    conservative: false,
+                },
+                depth_stencil: depth_stencil.clone(),
+                multisample: wgpu::MultisampleState {
+                    count: 4,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                // If the pipeline will be used with a multiview render pass, this
+                // indicates how many array layers the attachments will have.
+                multiview: None,
+            });
+
+        let dot_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Dot Render Pipeline"),
+            layout: Some(&segment_render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &segment_shader,
+                entry_point: "vs_dot",
+                buffers: offset_buffers_desc,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &segment_shader,
+                entry_point: "fs_dot",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    // blend: Some(wgpu::BlendState {
+                    //     color: BlendComponent {
+                    //         src_factor: BlendFactor::One,
+                    //         dst_factor: BlendFactor::One,
+                    //         operation: BlendOperation::Max,
+                    //     },
+                    //     alpha: BlendComponent {
+                    //         src_factor: BlendFactor::One,
+                    //         dst_factor: BlendFactor::One,
+                    //         operation: BlendOperation::Max,
+                    //     },
+                    // }),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
+                // or Features::POLYGON_MODE_POINT
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState {
+                count: 4,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            // If the pipeline will be used with a multiview render pass, this
+            // indicates how many array layers the attachments will have.
+            multiview: None,
+        });
+
+        let offset_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Offset Vertex Buffer"),
+            contents: bytemuck::cast_slice(OFFSET_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let offset_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Offset Index Buffer"),
+            contents: bytemuck::cast_slice(OFFSET_INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Point Buffer"),
+            contents: bytemuck::cast_slice(&POINTS),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+        });
+
+        let point_buffer2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Point Buffer"),
+            contents: bytemuck::cast_slice(&POINTS2),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+        });
+
+        let uniform_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("uniforms"),
+            size: 80,
+            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
+        let uniform_buffer2 = device.create_buffer(&BufferDescriptor {
+            label: Some("uniforms"),
+            size: 80,
+            usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
+        let line_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("segment bind group"),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: &uniform_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: &point_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+            layout: &line_bind_group_layout,
+        });
+
+        let line_bind_group2 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("segment bind group"),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: &uniform_buffer2,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(BufferBinding {
+                        buffer: &point_buffer2,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+            layout: &line_bind_group_layout,
+        });
+
+        let mut current_scale = RefCell::new({
+            let mut initial_scale =
+                POINTS
+                    .iter()
+                    .chain(POINTS2.iter())
+                    .fold(Scale::NAN, |scale, point| Scale {
+                        horizontal: AxisScale {
+                            start: f32_min(scale.horizontal.start, point.0),
+                            end: f32_max(scale.horizontal.end, point.0),
+                        },
+                        vertical: AxisScale {
+                            start: f32_min(scale.vertical.start, point.1),
+                            end: f32_max(scale.vertical.end, point.1),
+                        },
+                    });
+
+            for axis in [&mut initial_scale.horizontal, &mut initial_scale.vertical] {
+                if axis.start.is_finite() {
+                    if axis.start == axis.end {
+                        *axis = AxisScale {
+                            start: axis.start - 1.0,
+                            end: axis.start + 1.0,
+                        }
+                    }
+                } else {
                     *axis = AxisScale {
-                        start: axis.start - 1.0,
-                        end: axis.start + 1.0,
+                        start: -1.0,
+                        end: 1.0,
                     }
                 }
-            } else {
-                *axis = AxisScale {
-                    start: -1.0,
-                    end: 1.0,
+            }
+
+            initial_scale
+        });
+
+        let mut canvas_outer_size = Cell::new(ComponentSize::default());
+
+        let mut create_multisample_texture =
+            |device: &Device, config: &SurfaceConfiguration| -> Texture {
+                device.create_texture(&TextureDescriptor {
+                    label: Some("msaa"),
+                    size: Extent3d {
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: TextureDimension::D2,
+                    format: config.format,
+                    usage: TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+            };
+        let mut multisample_texture = RefCell::new(create_multisample_texture(&device, &config));
+
+        let mut create_depth_texture =
+            |device: &Device, config: &SurfaceConfiguration| -> Texture {
+                device.create_texture(&TextureDescriptor {
+                    label: Some("depth"),
+                    size: Extent3d {
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 4,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Depth24Plus,
+                    usage: TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+            };
+        let mut depth_texture = RefCell::new(create_depth_texture(&device, &config));
+
+        let plot = Plot {
+            device,
+            surface,
+            queue,
+            current_scale,
+            canvas_outer_size,
+            my_str,
+            offset_vertex_buffer,
+            offset_index_buffer,
+            uniform_buffer,
+            uniform_buffer2,
+            line_bind_group,
+            line_bind_group2,
+            multisample_texture,
+            depth_texture,
+            segment_render_pipeline,
+            dot_render_pipeline,
+        };
+
+        plot.queue_render().unwrap();
+
+        plot.my_str.modify(|_| "success!".to_owned());
+
+        'wait_for_events: loop {
+            let mut event = rx.next().await.expect("always some");
+            let mut count = 1;
+            'process_events: loop {
+                match event {
+                    CanvasEvent::Resize(size) => {
+                        plot.canvas_outer_size.set(size);
+                        let ratio = web_sys::window().unwrap().device_pixel_ratio();
+                        // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
+                        // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
+                        // let ratio = 0.5;
+                        config.width = ((size.width as f64) * ratio) as u32;
+                        config.height = ((size.height as f64) * ratio) as u32;
+
+                        plot.surface.configure(&plot.device, &config);
+
+                        let mut multisample_texture = plot.multisample_texture.borrow_mut();
+                        multisample_texture.destroy();
+                        *multisample_texture = create_multisample_texture(&plot.device, &config);
+
+                        let mut depth_texture = plot.depth_texture.borrow_mut();
+                        depth_texture.destroy();
+                        *depth_texture = create_depth_texture(&plot.device, &config);
+                    }
+                    CanvasEvent::Wheel(delta) => {
+                        // info!("{:?}", delta);
+                        let mut current_scale = plot.current_scale.borrow_mut();
+                        current_scale
+                            .horizontal
+                            .scale_pct(f32::exp(0.01 * delta.y as f32));
+                        current_scale.horizontal.shift_pct(
+                            (delta.x as f32) / (plot.canvas_outer_size.get().width as f32),
+                        );
+                    }
+                }
+
+                match rx.try_next() {
+                    Ok(Some(new_event)) => {
+                        event = new_event;
+                        count += 1;
+                        continue 'process_events;
+                    }
+                    // Error indicates no event ready for processing
+                    Err(_) => {
+                        plot.queue_render().unwrap();
+
+                        // log::info!("rendered changes for {count} events!");
+                        continue 'wait_for_events;
+                    }
+                    _ => todo!("component unloaded"),
                 }
             }
         }
+    }
 
-        initial_scale
-    });
+    fn queue_render(&self) -> Result<(), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
 
-    let mut canvas_outer_size = Cell::new(ComponentSize::default());
-
-    let mut create_multisample_texture = |config: &SurfaceConfiguration| -> Texture {
-        device.create_texture(&TextureDescriptor {
-            label: Some("msaa"),
-            size: Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 4,
-            dimension: TextureDimension::D2,
-            format: config.format,
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-    };
-    let mut multisample_texture = RefCell::new(create_multisample_texture(&config));
-
-    let mut create_depth_texture = |config: &SurfaceConfiguration| -> Texture {
-        device.create_texture(&TextureDescriptor {
-            label: Some("depth"),
-            size: Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 4,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Depth24Plus,
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-    };
-    let mut depth_texture = RefCell::new(create_depth_texture(&config));
-
-    let mut render = || -> Result<(), wgpu::SurfaceError> {
-        let output = surface.get_current_texture()?;
-
-        queue.write_buffer(
-            &uniform_buffer,
+        self.queue.write_buffer(
+            &self.uniform_buffer,
             0,
-            bytemuck::cast_slice(&current_scale.borrow().point_scale_to_uniform(
-                canvas_outer_size.get().width as u32,
-                canvas_outer_size.get().height as u32,
+            bytemuck::cast_slice(&self.current_scale.borrow().point_scale_to_uniform(
+                self.canvas_outer_size.get().width as u32,
+                self.canvas_outer_size.get().height as u32,
                 100,
                 &c1,
                 0.5,
@@ -728,12 +685,12 @@ pub async fn render_coroutine(mut rx: UnboundedReceiver<CanvasEvent>, my_str: Us
             )),
         );
 
-        queue.write_buffer(
-            &uniform_buffer2,
+        self.queue.write_buffer(
+            &self.uniform_buffer2,
             0,
-            bytemuck::cast_slice(&current_scale.borrow().point_scale_to_uniform(
-                canvas_outer_size.get().width as u32,
-                canvas_outer_size.get().height as u32,
+            bytemuck::cast_slice(&self.current_scale.borrow().point_scale_to_uniform(
+                self.canvas_outer_size.get().width as u32,
+                self.canvas_outer_size.get().height as u32,
                 100,
                 &c2,
                 0.5,
@@ -744,11 +701,11 @@ pub async fn render_coroutine(mut rx: UnboundedReceiver<CanvasEvent>, my_str: Us
         // info!("{:?}", POINTS.as_ref());
         // info!("Matrices");
         // info!("{current_scale:?}");
-        my_str.modify(|_| {
+        self.my_str.modify(|_| {
             format!(
                 "Transforms for {} x {}",
-                canvas_outer_size.get().width as u32,
-                canvas_outer_size.get().height as u32
+                self.canvas_outer_size.get().width as u32,
+                self.canvas_outer_size.get().height as u32
             )
         });
         // for mat in current_scale.point_scale_to_uniform(
@@ -762,19 +719,23 @@ pub async fn render_coroutine(mut rx: UnboundedReceiver<CanvasEvent>, my_str: Us
         //     // );
         // }
 
-        let multisample_view = multisample_texture
+        let multisample_view = self
+            .multisample_texture
             .borrow()
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_view = depth_texture
+        let depth_view = self
+            .depth_texture
             .borrow()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let final_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -802,79 +763,23 @@ pub async fn render_coroutine(mut rx: UnboundedReceiver<CanvasEvent>, my_str: Us
             });
 
             // for bind_group in [&line_bind_group, &line_bind_group2] {
-            for bind_group in [&line_bind_group] {
+            for bind_group in [&self.line_bind_group] {
                 render_pass.set_bind_group(0, bind_group, &[]);
-                render_pass.set_vertex_buffer(0, offset_vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(offset_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.set_pipeline(&segment_render_pipeline);
+                render_pass.set_vertex_buffer(0, self.offset_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(
+                    self.offset_index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
+                render_pass.set_pipeline(&self.segment_render_pipeline);
                 render_pass.draw_indexed(0..6, 0, 0..(u32::try_from(POINTS.len()).unwrap() - 1));
-                render_pass.set_pipeline(&dot_render_pipeline);
+                render_pass.set_pipeline(&self.dot_render_pipeline);
                 render_pass.draw_indexed(0..6, 0, 0..u32::try_from(POINTS.len()).unwrap());
             }
         }
 
-        queue.submit(iter::once(encoder.finish()));
+        self.queue.submit(iter::once(encoder.finish()));
         output.present();
 
         Ok(())
-    };
-
-    render().unwrap();
-
-    my_str.modify(|_| "success!".to_owned());
-
-    'wait_for_events: loop {
-        let mut event = rx.next().await.expect("always some");
-        let mut count = 1;
-        'process_events: loop {
-            match event {
-                CanvasEvent::Resize(size) => {
-                    canvas_outer_size.set(size);
-                    let ratio = web_sys::window().unwrap().device_pixel_ratio();
-                    // Consider using devicePixelContentBoxSize conditionally or once Safari supports it.
-                    // https://webgpufundamentals.org/webgpu/lessons/webgpu-resizing-the-canvas.html
-                    // let ratio = 0.5;
-                    config.width = ((size.width as f64) * ratio) as u32;
-                    config.height = ((size.height as f64) * ratio) as u32;
-
-                    surface.configure(&device, &config);
-
-                    let mut multisample_texture = multisample_texture.borrow_mut();
-                    multisample_texture.destroy();
-                    *multisample_texture = create_multisample_texture(&config);
-
-                    let mut depth_texture = depth_texture.borrow_mut();
-                    depth_texture.destroy();
-                    *depth_texture = create_depth_texture(&config);
-                }
-                CanvasEvent::Wheel(delta) => {
-                    // info!("{:?}", delta);
-                    let mut current_scale = current_scale.borrow_mut();
-                    current_scale
-                        .horizontal
-                        .scale_pct(f32::exp(0.01 * delta.y as f32));
-                    current_scale
-                        .horizontal
-                        .shift_pct((delta.x as f32) / (canvas_outer_size.get().width as f32));
-                }
-            }
-
-            match rx.try_next() {
-                Ok(Some(new_event)) => {
-                    event = new_event;
-                    count += 1;
-                    continue 'process_events;
-                }
-                // Error indicates no event ready for processing
-                Err(_) => {
-                    render().unwrap();
-
-                    // log::info!("rendered changes for {count} events!");
-                    continue 'wait_for_events;
-                }
-                _ => todo!("component unloaded"),
-            }
-        }
     }
 }

@@ -59,7 +59,7 @@ fn App(cx: Scope) -> Element {
 
     let render_coroutine = use_coroutine(cx, |mut rx: UnboundedReceiver<CanvasEvent>| {
         to_owned![my_str];
-        async move { render_coroutine(rx, my_str).await }
+        async move { Plot::render_coroutine(rx, my_str).await }
     });
 
     let size = use_ref(cx, ComponentSize::default);
