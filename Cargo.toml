@@ -1,3 +1,5 @@
 [workspace]
 
 members = ["client", "server"]
+
+default-members = ["server"]

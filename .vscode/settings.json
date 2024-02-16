@@ -3,8 +3,8 @@
     // "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
     "rust-analyzer.rust.analyzerTargetDir": "/home/deb/.ra-target",
     // "rust-analyzer.target"
-    // "rust-analyzer.cargo.extraArgs": [
-    //     "--target-dir",
-    //     "~/.ra-target"
-    // ]
+    "rust-analyzer.cargo.extraArgs": [
+        "-Z",
+        "bindeps"
+    ]
 }

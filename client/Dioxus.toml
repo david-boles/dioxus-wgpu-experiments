@@ -1,7 +1,7 @@
 [application]
 
 # App name
-name = "project_name"
+name = "client"
 
 # The Dioxus platform to default to
 default_platform = "web"
@@ -10,7 +10,7 @@ default_platform = "web"
 out_dir = "dist"
 
 # The static resource path
-asset_dir = "public"
+asset_dir = "assets"
 
 [web.app]
 

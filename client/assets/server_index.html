@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <title>project_name</title>
   <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
@@ -8,16 +9,18 @@
   <link rel="stylesheet" href="./reset.css">
 
 </head>
+
 <body>
   <div id="main"></div>
   <script type="module">
-    import init from "/./assets/dioxus/project_name.js";
-    init("/./assets/dioxus/project_name_bg.wasm").then(wasm => {
+    import init from "/./assets/dioxus/client.js";
+    init("/./assets/dioxus/client_bg.wasm").then(wasm => {
       if (wasm.__wbindgen_start == undefined) {
         wasm.main();
       }
     });
   </script>
-  
+
 </body>
+
 </html>
