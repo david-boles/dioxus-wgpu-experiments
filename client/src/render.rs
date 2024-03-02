@@ -628,11 +628,10 @@ impl Plot {
     }
 
     pub async fn run_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
-        // join!(
-        //     Plot::run_render_event_loop(Rc::clone(&self), rx),
-        //     self.data_cache.run_event_loop()
-        // );
-        Plot::run_render_event_loop(Rc::clone(&self), rx).await;
+        join!(
+            Plot::run_render_event_loop(Rc::clone(&self), rx),
+            self.data_cache.run_event_loop()
+        );
     }
 
     async fn run_render_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
@@ -644,9 +643,7 @@ impl Plot {
         };
 
         'wait_for_events: loop {
-            info!("waiting for event");
             let mut event = rx.next().await.expect("always some");
-            info!("got event");
             let mut count = 1;
             'process_events: loop {
                 match event {
@@ -710,8 +707,6 @@ impl Plot {
     }
 
     fn queue_render(&self) -> Result<(), wgpu::SurfaceError> {
-        info!("rendering");
-
         self.animation_frame_requested_but_render_not_queued
             .set(false);
 
