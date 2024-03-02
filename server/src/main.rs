@@ -1,5 +1,6 @@
 use axum::{
     body::Body,
+    extract::{ws::WebSocket, WebSocketUpgrade},
     http::{header, HeaderValue, StatusCode},
     response::Response,
     routing::get,
@@ -24,7 +25,18 @@ async fn main() {
         )
     }
 
+    app = app.route(
+        "/signal",
+        get(|ws: WebSocketUpgrade| async { ws.on_upgrade(signal_handler) }),
+    );
+
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn signal_handler(mut socket: WebSocket) {
+    while let Some(Ok(msg)) = socket.recv().await {
+        dbg!(msg);
+    }
 }

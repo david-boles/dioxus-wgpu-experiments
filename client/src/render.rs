@@ -1,14 +1,15 @@
 #![allow(non_snake_case)]
-use console_log::log;
+use console_log::{init, log};
 use dioxus::html::geometry::{PixelsVector, WheelDelta};
 // import the prelude to get access to the `rsx!` macro and the `Scope` and `Element` types
 use dioxus::prelude::*;
+use futures_util::join;
 // use dioxus_helmet::Helmet;
 use futures_util::stream::StreamExt;
 use js_sys::is_finite;
 use js_sys::Math::random;
 use lazy_static::lazy_static;
-use log::info;
+use log::{info, log};
 use rand::{distributions::Uniform, Rng};
 use std::borrow::BorrowMut;
 use std::cell::Cell;
@@ -40,8 +41,10 @@ use winit::{
     window::WindowBuilder,
 };
 
+use data_cache::*;
 use scale::*;
 
+mod data_cache;
 mod scale;
 
 use wasm_bindgen::prelude::*;
@@ -168,7 +171,7 @@ pub enum CanvasEvent {
 }
 
 pub struct Plot {
-    device: Device,
+    device: Rc<Device>,
     surface: Surface,
     config: RefCell<SurfaceConfiguration>,
     queue: Queue,
@@ -186,10 +189,10 @@ pub struct Plot {
     segment_render_pipeline: RenderPipeline,
     dot_render_pipeline: RenderPipeline,
     animation_frame_requested_but_render_not_queued: Cell<bool>,
+    data_cache: DataCache,
 }
 
 impl Plot {
-    // create a component that renders a div with the text "Hello, world!"
     pub async fn new(my_str: UseState<String>) -> Rc<Plot> {
         my_str.modify(|_| "begun".to_owned());
         let canvas = web_sys::window()
@@ -516,7 +519,7 @@ impl Plot {
             layout: &line_bind_group_layout,
         });
 
-        let mut current_scale = RefCell::new({
+        let initial_scale = {
             let mut initial_scale =
                 POINTS
                     .iter()
@@ -549,7 +552,8 @@ impl Plot {
             }
 
             initial_scale
-        });
+        };
+        let current_scale = RefCell::new(initial_scale);
 
         let mut canvas_outer_size = Cell::new(ComponentSize::default());
 
@@ -558,8 +562,10 @@ impl Plot {
 
         let mut depth_texture = RefCell::new(Self::create_depth_texture(&device, &config));
 
+        let device = Rc::new(device);
+
         let plot = Plot {
-            device,
+            device: Rc::clone(&device),
             surface,
             config: RefCell::new(config),
             queue,
@@ -577,6 +583,7 @@ impl Plot {
             segment_render_pipeline,
             dot_render_pipeline,
             animation_frame_requested_but_render_not_queued: Cell::new(false),
+            data_cache: DataCache::new(device, initial_scale),
         };
 
         plot.queue_render().unwrap();
@@ -620,7 +627,15 @@ impl Plot {
         })
     }
 
-    pub async fn start_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
+    pub async fn run_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
+        // join!(
+        //     Plot::run_render_event_loop(Rc::clone(&self), rx),
+        //     self.data_cache.run_event_loop()
+        // );
+        Plot::run_render_event_loop(Rc::clone(&self), rx).await;
+    }
+
+    async fn run_render_event_loop(self: Rc<Self>, mut rx: UnboundedReceiver<CanvasEvent>) {
         let window = web_sys::window().unwrap();
 
         let queue_render_js_closure = {
@@ -629,7 +644,9 @@ impl Plot {
         };
 
         'wait_for_events: loop {
+            info!("waiting for event");
             let mut event = rx.next().await.expect("always some");
+            info!("got event");
             let mut count = 1;
             'process_events: loop {
                 match event {
@@ -693,6 +710,8 @@ impl Plot {
     }
 
     fn queue_render(&self) -> Result<(), wgpu::SurfaceError> {
+        info!("rendering");
+
         self.animation_frame_requested_but_render_not_queued
             .set(false);
 
@@ -805,6 +824,8 @@ impl Plot {
 
         self.queue.submit(iter::once(encoder.finish()));
         output.present();
+
+        info!("done");
 
         Ok(())
     }
