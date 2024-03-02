@@ -19,7 +19,13 @@ web-sys = { version = "0.3.64", features = [
     "ProgressEvent",
     "WebSocket",
 ] }
-dioxus-web = "0.4.0"
+dioxus-web = { version = "0.4.0", default-features = false, features = [
+    "panic_hook",
+    "mounted",
+    "file_engine",
+    # "hot_reload",
+    "eval",
+] }
 # dioxus-helmet = "0.2.4"
 futures-util = "0.3.29"
 fxhash = "0.2.1"
