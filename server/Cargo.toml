@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.7.4", features = ["ws"] }
 tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread"] }
-
+shared = { path = "../shared" }
 
 [build-dependencies]
 client = { path = "../client", artifact = "bin", target = "wasm32-unknown-unknown" }

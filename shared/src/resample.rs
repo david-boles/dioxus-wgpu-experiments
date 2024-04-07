@@ -1,41 +1,10 @@
+/// Minimum viable 
 use std::{
     cmp::{max, min},
     collections::VecDeque,
     mem,
 };
 
-use js_sys::Math::floor;
-use web_sys::console::assert;
-
-fn f32_min(a: f32, b: f32) -> f32 {
-    match (a.is_finite(), b.is_finite()) {
-        (true, true) => {
-            if a.lt(&b) {
-                a
-            } else {
-                b
-            }
-        }
-        (true, false) => a,
-        (false, true) => b,
-        (false, false) => f32::MAX,
-    }
-}
-
-fn f32_max(a: f32, b: f32) -> f32 {
-    match (a.is_finite(), b.is_finite()) {
-        (true, true) => {
-            if a.gt(&b) {
-                a
-            } else {
-                b
-            }
-        }
-        (true, false) => a,
-        (false, true) => b,
-        (false, false) => f32::MAX,
-    }
-}
 
 #[derive(Debug)]
 struct PositionalVecDeque<T> {

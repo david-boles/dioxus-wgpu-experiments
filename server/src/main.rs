@@ -7,6 +7,8 @@ use axum::{
     Router,
 };
 
+mod resample;
+
 include!(concat!(env!("OUT_DIR"), "/client.rs"));
 
 #[tokio::main]

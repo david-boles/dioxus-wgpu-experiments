@@ -820,8 +820,6 @@ impl Plot {
         self.queue.submit(iter::once(encoder.finish()));
         output.present();
 
-        info!("done");
-
         Ok(())
     }
 }

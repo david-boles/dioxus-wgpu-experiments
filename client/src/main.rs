@@ -40,7 +40,7 @@ use winit::{
 
 use wasm_bindgen::prelude::*;
 
-mod decimate;
+// mod decimate;
 
 mod render;
 mod resize;

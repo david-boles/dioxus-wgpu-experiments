@@ -2315,6 +2315,7 @@ dependencies = [
  "axum",
  "client",
  "quote",
+ "shared",
  "tokio",
  "wasm-bindgen-cli-support",
 ]
@@ -2329,6 +2330,10 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "shared"
+version = "0.1.0"
 
 [[package]]
 name = "slab"
